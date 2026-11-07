@@ -146,3 +146,107 @@ export async function analyzeWithGemini({ text, audioBuffer, mimeType = 'audio/w
   };
 }
 
+/**
+ * Agentic Household Assistant with full live family context.
+ * Understands what to buy, kitchen inventory, recipes, missing items, tasks, expenses, and medicines.
+ */
+export async function agenticFamilyAssistant({ message = '', audioBuffer, mimeType = 'audio/webm', context = {}, history = [] }) {
+  const parts = [];
+
+  const neededGroceriesSummary = (context.neededGroceries || []).map((g) => `${g.name}${g.qty ? ` (${g.qty})` : ''}`).join(', ') || 'None';
+  const inStockSummary = (context.inStockGroceries || []).map((g) => `${g.name}${g.qty ? ` (${g.qty})` : ''}`).join(', ') || 'None';
+  const tasksSummary = (context.openTasks || []).map((t) => `ID:${t._id || t.id} - ${t.title}${t.assigneeId?.displayName ? ` (for ${t.assigneeId.displayName})` : ''}`).join('; ') || 'No open tasks';
+  const medicinesSummary = (context.todayMedicines || []).map((m) => `${m.forMemberId?.displayName || 'Member'}: ${m.name} at ${m.time || 'scheduled'} (${m.dosage || '1 dose'}) - Status: ${m.status || 'pending'}`).join('; ') || 'No medicines scheduled today';
+  const expensesBreakdown = Object.entries(context.monthlyExpenseCategories || {}).map(([cat, amt]) => `${cat}: ₹${amt}`).join(', ') || 'None';
+
+  const agentPrompt = `You are Hommi AI, a friendly, intelligent, and proactive household assistant for a family.
+Family members communicate in Malayalam, Manglish (Malayalam in English script), English, Tamil, or Hindi.
+Respond in the language the user used (default to natural Malayalam/Manglish if Malayalam was used, or English if English was used). Keep responses concise, warm, helpful, and clear.
+
+LIVE HOUSEHOLD GROUND-TRUTH CONTEXT:
+1. Needed Groceries (Items to buy): ${neededGroceriesSummary}
+2. Kitchen Inventory (Items in stock at home): ${inStockSummary}
+3. Open Tasks: ${tasksSummary}
+4. Today's Medicines & Status: ${medicinesSummary}
+5. Current Month Total Expenses: ₹${context.monthlyExpenseTotal || 0} (Breakdown: ${expensesBreakdown})
+6. Today's Planned Meals: ${JSON.stringify(context.todayMeals || [])}
+7. Upcoming Bills: ${JSON.stringify(context.upcomingBills || [])}
+
+YOUR AGENTIC CAPABILITIES:
+1. Groceries & Kitchen:
+   - "What to buy / എന്തൊക്കെ വാങ്ങാനുണ്ട്?": List the currently Needed Groceries.
+   - "What's in my kitchen / അടുക്കളയിൽ എന്തൊക്കെയുണ്ട്?": List the items currently in stock in the kitchen.
+2. Smart Recipe & Missing-Ingredients:
+   - When user asks to make a recipe (e.g. "I want to make biriyani / ബിരിയാണി ഉണ്ടാക്കണം", "സാമ്പാർ ഉണ്ടാക്കണം", "ദോശ..."):
+     a) List key ingredients required for the dish.
+     b) Cross-check with Kitchen Inventory (items in stock). Explicitly state which ingredients are ALREADY at home ("നിങ്ങളുടെ അടുക്കളയിൽ [items] ഉണ്ട്").
+     c) Identify which ingredients are MISSING.
+     d) Propose "add_grocery" actions ONLY for the missing ingredients.
+     e) DYNAMIC CATEGORIZATION: For each item, assign an intelligent category (e.g. "vegetables", "dairy", "spices", "meat", "pantry", "bakery", "fruits", "household") using AI common sense (NOT fixed rules).
+3. Tasks:
+   - If asked what tasks are pending, summarize from Open Tasks.
+   - If asked to add a task, propose an "add_task" action with title.
+   - If asked to delete/complete a task, match from Open Tasks and propose a "delete_task" action with targetId!
+4. Monthly Expense:
+   - If asked about expenses / spending ("ഈ മാസം എത്ര ചിലവായി?"), report the exact ground-truth total (₹${context.monthlyExpenseTotal || 0}) and category breakdown.
+5. Medicine Tracking:
+   - If asked about medicines today ("മരുന്ന് കഴിച്ചോ?", "ഇന്ന് എന്തൊക്കെ മരുന്നുണ്ട്?"), report the schedule, dosage, and status.
+
+OUTPUT FORMAT:
+Respond strictly in JSON without markdown codeblocks or backticks:
+{
+  "transcription": "<if audio was provided, the transcribed text, else empty string>",
+  "reply": "<Friendly, clear conversational answer in user's language>",
+  "actions": [
+    {
+      "type": "add_grocery" | "add_task" | "delete_task" | "add_expense",
+      "title": "<item or task title>",
+      "category": "<dynamic category like vegetables, dairy, spices, meat, etc.>",
+      "quantity": "<optional e.g. 1 kg, 500 ml, or null>",
+      "amount": <number or null>,
+      "targetId": "<id of item if delete_task>"
+    }
+  ],
+  "suggestedChips": ["<short relevant follow-up question or chip 1>", "<short relevant follow-up question or chip 2>"]
+}`;
+
+  if (audioBuffer && audioBuffer.length > 0) {
+    parts.push({
+      inline_data: {
+        mime_type: mimeType,
+        data: audioBuffer.toString('base64'),
+      },
+    });
+    parts.push({
+      text: `${agentPrompt}\n\nListen carefully to this voice note from the user and respond in JSON:`,
+    });
+  } else {
+    let histText = '';
+    if (history.length > 0) {
+      histText = `\nRecent Conversation History:\n${history.map((h) => `${h.role === 'user' ? 'User' : 'Assistant'}: ${h.content}`).join('\n')}\n`;
+    }
+    parts.push({
+      text: `${agentPrompt}${histText}\nUser Message: "${(message || '').trim()}"\n\nRespond in JSON:`,
+    });
+  }
+
+  const rawResult = await callGemini({ contents: [{ parts }] });
+  const result = cleanJson(rawResult);
+
+  if (!result || typeof result !== 'object') {
+    return {
+      transcription: '',
+      reply: 'ക്ഷമിക്കണം, എനിക്ക് അത് മനസ്സിലാക്കാൻ സാധിച്ചില്ല. ദയവായി ഒന്നുകൂടി പറയാമോ?',
+      actions: [],
+      suggestedChips: ['എന്തൊക്കെ വാങ്ങാനുണ്ട്?', 'ഈ മാസത്തെ ചിലവ് എത്ര?'],
+    };
+  }
+
+  return {
+    transcription: result.transcription || '',
+    reply: result.reply || '',
+    actions: Array.isArray(result.actions) ? result.actions : [],
+    suggestedChips: Array.isArray(result.suggestedChips) ? result.suggestedChips : [],
+  };
+}
+
