@@ -154,9 +154,10 @@ export async function analyzeWithGemini({ text, audioBuffer, mimeType = 'audio/w
   const ctxString = formatContext(context);
 
   if (audioBuffer && audioBuffer.length > 0) {
+    const cleanMime = (mimeType || 'audio/webm').split(';')[0].trim();
     parts.push({
-      inline_data: {
-        mime_type: mimeType,
+      inlineData: {
+        mimeType: cleanMime,
         data: audioBuffer.toString('base64'),
       },
     });
@@ -171,27 +172,38 @@ export async function analyzeWithGemini({ text, audioBuffer, mimeType = 'audio/w
     throw new Error('Either text or audio is required for AI analysis');
   }
 
-  const rawResult = await callGemini({ contents: [{ parts }] });
-  const result = cleanJson(rawResult);
+  try {
+    const rawResult = await callGemini({ contents: [{ parts }] });
+    const result = cleanJson(rawResult);
 
-  if (!result || typeof result !== 'object') {
+    if (!result || typeof result !== 'object') {
+      return {
+        transcription: text || '',
+        summary: 'Could not extract actions from this message',
+        reply: 'Could not extract actions from this message',
+        actions: [],
+      };
+    }
+
+    return {
+      transcription: result.transcription || text || '',
+      summary: result.reply || result.summary || '',
+      reply: result.reply || result.summary || '',
+      actions: Array.isArray(result.actions)
+        ? result.actions.filter((a) => a && typeof a.title === 'string' && a.title.trim().length > 0)
+        : [],
+      suggestedChips: Array.isArray(result.suggestedChips) ? result.suggestedChips : [],
+    };
+  } catch (err) {
+    console.error('[Gemini AI analyze error]:', err?.message);
     return {
       transcription: text || '',
-      summary: 'Could not extract actions from this message',
-      reply: 'Could not extract actions from this message',
+      summary: 'ക്ഷമിക്കണം, എഐ പ്രോസസ്സ് ചെയ്യുന്നതിൽ തടസ്സമുണ്ടായി. ദയവായി വീണ്ടും ശ്രമിക്കുക.',
+      reply: 'ക്ഷമിക്കണം, എഐ പ്രോസസ്സ് ചെയ്യുന്നതിൽ തടസ്സമുണ്ടായി. ദയവായി വീണ്ടും ശ്രമിക്കുക.',
       actions: [],
+      suggestedChips: ['എന്തൊക്കെ വാങ്ങാനുണ്ട്?', 'ഈ മാസത്തെ ചിലവ് എത്ര?'],
     };
   }
-
-  return {
-    transcription: result.transcription || text || '',
-    summary: result.reply || result.summary || '',
-    reply: result.reply || result.summary || '',
-    actions: Array.isArray(result.actions)
-      ? result.actions.filter((a) => a && typeof a.title === 'string' && a.title.trim().length > 0)
-      : [],
-    suggestedChips: Array.isArray(result.suggestedChips) ? result.suggestedChips : [],
-  };
 }
 
 /**
@@ -207,9 +219,10 @@ export async function agenticFamilyAssistant({ message = '', audioBuffer, mimeTy
   }
 
   if (audioBuffer && audioBuffer.length > 0) {
+    const cleanMime = (mimeType || 'audio/webm').split(';')[0].trim();
     parts.push({
-      inline_data: {
-        mime_type: mimeType,
+      inlineData: {
+        mimeType: cleanMime,
         data: audioBuffer.toString('base64'),
       },
     });
@@ -222,22 +235,32 @@ export async function agenticFamilyAssistant({ message = '', audioBuffer, mimeTy
     });
   }
 
-  const rawResult = await callGemini({ contents: [{ parts }] });
-  const result = cleanJson(rawResult);
+  try {
+    const rawResult = await callGemini({ contents: [{ parts }] });
+    const result = cleanJson(rawResult);
 
-  if (!result || typeof result !== 'object') {
+    if (!result || typeof result !== 'object') {
+      return {
+        transcription: '',
+        reply: 'ക്ഷമിക്കണം, എനിക്ക് അത് മനസ്സിലാക്കാൻ സാധിച്ചില്ല. ദയവായി ഒന്നുകൂടി പറയാമോ?',
+        actions: [],
+        suggestedChips: ['എന്തൊക്കെ വാങ്ങാനുണ്ട്?', 'ഈ മാസത്തെ ചിലവ് എത്ര?'],
+      };
+    }
+
+    return {
+      transcription: result.transcription || '',
+      reply: result.reply || result.summary || '',
+      actions: Array.isArray(result.actions) ? result.actions : [],
+      suggestedChips: Array.isArray(result.suggestedChips) ? result.suggestedChips : [],
+    };
+  } catch (err) {
+    console.error('[Gemini AI agent error]:', err?.message);
     return {
       transcription: '',
-      reply: 'ക്ഷമിക്കണം, എനിക്ക് അത് മനസ്സിലാക്കാൻ സാധിച്ചില്ല. ദയവായി ഒന്നുകൂടി പറയാമോ?',
+      reply: 'ക്ഷമിക്കണം, എഐ പ്രോസസ്സ് ചെയ്യുന്നതിൽ തടസ്സമുണ്ടായി. ദയവായി വീണ്ടും ശ്രമിക്കുക.',
       actions: [],
       suggestedChips: ['എന്തൊക്കെ വാങ്ങാനുണ്ട്?', 'ഈ മാസത്തെ ചിലവ് എത്ര?'],
     };
   }
-
-  return {
-    transcription: result.transcription || '',
-    reply: result.reply || result.summary || '',
-    actions: Array.isArray(result.actions) ? result.actions : [],
-    suggestedChips: Array.isArray(result.suggestedChips) ? result.suggestedChips : [],
-  };
 }

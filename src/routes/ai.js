@@ -33,76 +33,88 @@ async function buildFamilyContext(familyId) {
   const tomorrowStr = new Date(Date.now() + 86400000).toISOString().slice(0, 10);
   const currentMonth = todayStr.slice(0, 7);
 
-  // 1. Members
-  const { docs: memberDocs, map: memberMap } = await loadMembers(familyId);
-  const familyMembers = memberDocs.map((m) => ({
-    id: String(m._id),
-    name: m.displayName,
-    relation: m.relation,
-  }));
+  let familyMembers = [];
+  let memberDocs = [];
+  let memberMap = new Map();
+  let neededGroceries = [];
+  let inStockGroceries = [];
+  let openTasks = [];
+  let todayMedicines = [];
+  let monthlyExpenseTotal = 0;
+  let monthlyExpenseCategories = {};
+  let todayMeals = [];
+  let upcomingBills = [];
 
-  // 2. Needed Groceries & Kitchen Stock (Note: 'stocked' is the schema enum for in-stock!)
-  const [neededGroceries, inStockGroceries] = await Promise.all([
-    GroceryItem.find({ familyId, status: 'needed' }).select('name qty category shop').limit(60).lean(),
-    GroceryItem.find({ familyId, status: 'stocked' }).select('name qty category shop').limit(60).lean(),
-  ]);
+  try {
+    const mem = await loadMembers(familyId);
+    memberDocs = mem.docs || [];
+    memberMap = mem.map || new Map();
+    familyMembers = memberDocs.map((m) => ({
+      id: String(m._id),
+      name: m.displayName,
+      relation: m.relation,
+    }));
+  } catch {}
 
-  // 3. Open Tasks
-  const openTasks = await Task.find({ familyId, status: 'open' })
-    .select('title dueDate kind assigneeId')
-    .populate('assigneeId', 'displayName')
-    .limit(30)
-    .lean();
+  try {
+    [neededGroceries, inStockGroceries] = await Promise.all([
+      GroceryItem.find({ familyId, status: 'needed' }).select('name qty category shop').limit(60).lean(),
+      GroceryItem.find({ familyId, status: 'stocked' }).select('name qty category shop').limit(60).lean(),
+    ]);
+  } catch {}
 
-  // 4. Medicines Today
-  const [medicines, medLogs] = await Promise.all([
-    Medicine.find({ familyId, active: true })
-      .select('name dosage times instructions forMemberId')
-      .populate('forMemberId', 'displayName')
-      .lean(),
-    MedicineLog.find({ familyId, date: todayStr }).select('medicineId time status').lean(),
-  ]);
+  try {
+    openTasks = await Task.find({ familyId, status: 'open' })
+      .select('title dueDate kind assigneeId')
+      .populate('assigneeId', 'displayName')
+      .limit(30)
+      .lean();
+  } catch {}
 
-  const todayMedicines = [];
-  for (const med of medicines) {
-    for (const time of med.times || []) {
-      const log = medLogs.find((l) => String(l.medicineId) === String(med._id) && l.time === time);
-      todayMedicines.push({
-        id: String(med._id),
-        name: med.name,
-        dosage: med.dosage,
-        time,
-        forMemberId: med.forMemberId,
-        status: log?.status || 'pending',
-      });
+  try {
+    const [medicines, medLogs] = await Promise.all([
+      Medicine.find({ familyId, active: true })
+        .select('name dosage times instructions forMemberId')
+        .populate('forMemberId', 'displayName')
+        .lean(),
+      MedicineLog.find({ familyId, date: todayStr }).select('medicineId time status').lean(),
+    ]);
+
+    for (const med of medicines || []) {
+      for (const time of med.times || []) {
+        const log = (medLogs || []).find((l) => String(l.medicineId) === String(med._id) && l.time === time);
+        todayMedicines.push({
+          id: String(med._id),
+          name: med.name,
+          dosage: med.dosage,
+          time,
+          forMemberId: med.forMemberId,
+          status: log?.status || 'pending',
+        });
+      }
     }
-  }
+  } catch {}
 
-  // 5. Monthly Expenses
-  const expenses = await Expense.find({
-    familyId,
-    date: { $regex: `^${currentMonth}` },
-  }).select('amount category note date').lean();
+  try {
+    const expenses = await Expense.find({
+      familyId,
+      date: { $regex: `^${currentMonth}` },
+    }).select('amount category note date').lean();
 
-  let monthlyExpenseTotalPaise = 0;
-  const monthlyExpenseCategories = {};
-  for (const exp of expenses) {
-    monthlyExpenseTotalPaise += exp.amount || 0;
-    const cat = exp.category || 'other';
-    monthlyExpenseCategories[cat] = (monthlyExpenseCategories[cat] || 0) + Math.round((exp.amount || 0) / 100);
-  }
-  const monthlyExpenseTotal = Math.round(monthlyExpenseTotalPaise / 100);
+    let monthlyExpenseTotalPaise = 0;
+    for (const exp of expenses || []) {
+      monthlyExpenseTotalPaise += exp.amount || 0;
+      const cat = exp.category || 'other';
+      monthlyExpenseCategories[cat] = (monthlyExpenseCategories[cat] || 0) + Math.round((exp.amount || 0) / 100);
+    }
+    monthlyExpenseTotal = Math.round(monthlyExpenseTotalPaise / 100);
+  } catch {}
 
-  // 6. Meals Today & Tomorrow
-  const todayMeals = await MealPlan.find({ familyId, date: { $in: [todayStr, tomorrowStr] } })
-    .select('date slot items cookId')
-    .lean();
-
-  // 7. Upcoming Bills
-  const upcomingBills = await BillInstance.find({ familyId, status: { $ne: 'paid' } })
-    .select('billTitle dueDate amount status')
-    .limit(5)
-    .lean();
+  try {
+    todayMeals = await MealPlan.find({ familyId, date: { $in: [todayStr, tomorrowStr] } })
+      .select('date slot items cookId')
+      .lean();
+  } catch {}
 
   return {
     todayStr,
@@ -110,14 +122,14 @@ async function buildFamilyContext(familyId) {
     familyMembers,
     memberDocs,
     memberMap,
-    neededGroceries,
-    inStockGroceries,
-    openTasks,
-    todayMedicines,
+    neededGroceries: neededGroceries || [],
+    inStockGroceries: inStockGroceries || [],
+    openTasks: openTasks || [],
+    todayMedicines: todayMedicines || [],
     monthlyExpenseTotal,
     monthlyExpenseCategories,
-    todayMeals,
-    upcomingBills,
+    todayMeals: todayMeals || [],
+    upcomingBills: upcomingBills || [],
   };
 }
 
