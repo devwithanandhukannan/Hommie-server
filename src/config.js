@@ -50,4 +50,5 @@ export const config = {
   maxDocBytes: 4 * 1024 * 1024,
   familyDocQuotaBytes: 80 * 1024 * 1024,
   defaultTimezone: e.DEFAULT_TIMEZONE || 'Asia/Kolkata',
+  geminiApiKey: e.GEMINI_API_KEY || '',
 };

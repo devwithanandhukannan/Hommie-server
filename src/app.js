@@ -20,6 +20,7 @@ import { documents, attachments } from './routes/documents.js';
 import { medicines } from './routes/medicine.js';
 import { specialDates, guests, contacts } from './routes/life.js';
 import { chat } from './routes/chat.js';
+import { ai } from './routes/ai.js';
 import { dashboard, overview } from './routes/dashboard.js';
 import { calendar } from './routes/calendar.js';
 import { runTick } from './jobs/tick.js';
@@ -76,6 +77,7 @@ export function createApp() {
   scoped.use('/guests', guests);
   scoped.use('/contacts', contacts);
   scoped.use('/chat', chat);
+  scoped.use('/ai', ai);
   scoped.use('/calendar', calendar);
   api.use(scoped);
 

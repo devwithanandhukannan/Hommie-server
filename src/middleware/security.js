@@ -43,3 +43,7 @@ export const uploadLimiter = rateLimit({
   ...limiterBase, windowMs: 60 * 60_000, limit: 60, skip: skipInTest,
   keyGenerator: (req) => req.ctx?.user?.id || req.ip,
 });
+export const aiLimiter = rateLimit({
+  ...limiterBase, windowMs: 60_000, limit: 15, skip: skipInTest,
+  keyGenerator: (req) => req.ctx?.user?.id || req.ip,
+});
