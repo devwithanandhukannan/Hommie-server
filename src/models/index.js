@@ -117,6 +117,7 @@ export const GroceryItem = mk('GroceryItem', {
   addedBy: { type: ObjectId },
   lastBoughtBy: { type: ObjectId },
   lastBoughtAt: { type: Date },
+  lastPrice: { type: Number },
   buyDates: [{ type: Date }],
 }, [[{ familyId: 1, nameKey: 1 }, { unique: true }]]);
 

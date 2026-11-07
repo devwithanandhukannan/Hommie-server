@@ -70,17 +70,51 @@ grocery.post('/:id/bought', validate({ params: idParams, body: z.object({ price:
   g.lastBoughtBy = req.ctx.me;
   g.lastBoughtAt = now;
   g.buyDates = [...(g.buyDates || []), now].slice(-8);
+  if (req.valid.body?.price) {
+    g.lastPrice = req.valid.body.price;
+  }
   await g.save();
-  if (req.valid.body.price) {
+  if (req.valid.body?.price) {
     const { ids } = await loadMembers(req.ctx.familyId);
     await createExpense({
       familyId: req.ctx.familyId, amount: req.valid.body.price, category: 'grocery', date: req.valid.body.date || todayIn(req.ctx.family.timezone),
       paidById: req.ctx.me, split: equalSplit(req.valid.body.price, ids), note: g.name, source: 'grocery', sourceId: g._id, createdBy: req.ctx.me,
     });
   }
-  await systemMessage(req.ctx.familyId, `${g.name} bought by ${req.ctx.membership.displayName}`, { kind: 'grocery', id: g._id, title: g.name });
+  await systemMessage(
+    req.ctx.familyId,
+    `${g.name} bought by ${req.ctx.membership.displayName}${req.valid.body?.price ? ` (₹${Math.round(req.valid.body.price / 100)})` : ''}`,
+    { kind: 'grocery', id: g._id, title: g.name }
+  );
   const { map } = await loadMembers(req.ctx.familyId);
   res.json(groceryDto(g, map));
+}));
+
+grocery.post('/:id/price', validate({ params: idParams, body: z.object({ price: money, date: ymd.optional() }).strict() }), h(async (req, res) => {
+  const g = await GroceryItem.findOne({ _id: req.valid.params.id, familyId: req.ctx.familyId });
+  if (!g) throw notFound();
+  g.lastPrice = req.valid.body.price;
+  await g.save();
+  const { ids } = await loadMembers(req.ctx.familyId);
+  await createExpense({
+    familyId: req.ctx.familyId,
+    amount: req.valid.body.price,
+    category: 'grocery',
+    date: req.valid.body.date || todayIn(req.ctx.family.timezone),
+    paidById: req.ctx.me,
+    split: equalSplit(req.valid.body.price, ids),
+    note: g.name,
+    source: 'grocery',
+    sourceId: g._id,
+    createdBy: req.ctx.me,
+  });
+  await systemMessage(
+    req.ctx.familyId,
+    `Added expense for ${g.name}: ₹${Math.round(req.valid.body.price / 100)} by ${req.ctx.membership.displayName}`,
+    { kind: 'grocery', id: g._id, title: g.name }
+  );
+  const { map } = await loadMembers(req.ctx.familyId);
+  res.status(200).json(groceryDto(g, map));
 }));
 
 grocery.post('/:id/need', validate({ params: idParams }), h(async (req, res) => {

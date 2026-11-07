@@ -35,6 +35,7 @@ export function groceryDto(g, map, nowMs = Date.now()) {
   return {
     id: s(g._id), name: g.name, qty: g.qty || '', status: g.status,
     category: g.category || 'other', shop: g.shop || 'Supermarket',
+    lastPrice: g.lastPrice || null,
     lastBought: g.lastBoughtAt ? { by: pick(map, g.lastBoughtBy), at: iso(g.lastBoughtAt) } : null,
     avgIntervalDays: avg ? Math.round(avg * 10) / 10 : null,
     likelyLow: g.status === 'stocked' && avg !== null && since !== null && since >= avg * 0.85,
