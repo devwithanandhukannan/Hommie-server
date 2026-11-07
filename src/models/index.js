@@ -94,7 +94,7 @@ export const Task = mk('Task', {
   familyId: { type: ObjectId, required: true },
   title: { type: String, required: true, maxlength: 140 },
   description: { type: String, maxlength: 1000 },
-  kind: { type: String, enum: ['chore', 'bill', 'grocery', 'custom'], default: 'custom' },
+  kind: { type: String, enum: ['chore', 'bill', 'grocery', 'custom', 'calendar', 'meal'], default: 'custom' },
   assigneeId: { type: ObjectId, default: null },
   createdBy: { type: ObjectId },
   dueDate: { type: String },
@@ -108,9 +108,11 @@ export const Task = mk('Task', {
 
 export const GroceryItem = mk('GroceryItem', {
   familyId: { type: ObjectId, required: true },
-  name: { type: String, required: true, maxlength: 80 },
+  name: { type: String, required: true, maxlength: 140 },
   nameKey: { type: String, required: true },
-  qty: { type: String, maxlength: 30 },
+  qty: { type: String, maxlength: 60 },
+  category: { type: String, maxlength: 50, default: 'other' },
+  shop: { type: String, maxlength: 60, default: 'Supermarket' },
   status: { type: String, enum: ['needed', 'stocked'], default: 'needed' },
   addedBy: { type: ObjectId },
   lastBoughtBy: { type: ObjectId },
@@ -120,10 +122,10 @@ export const GroceryItem = mk('GroceryItem', {
 
 export const Recipe = mk('Recipe', {
   familyId: { type: ObjectId, required: true, index: true },
-  title: { type: String, required: true, maxlength: 100 },
-  ingredients: [new Schema({ name: { type: String, maxlength: 80 }, qty: { type: String, maxlength: 30 } }, { _id: false })],
-  steps: [{ type: String, maxlength: 600 }],
-  tags: [{ type: String, maxlength: 24 }],
+  title: { type: String, required: true, maxlength: 140 },
+  ingredients: [new Schema({ name: { type: String, maxlength: 120 }, qty: { type: String, maxlength: 60 } }, { _id: false })],
+  steps: [{ type: String, maxlength: 1000 }],
+  tags: [{ type: String, maxlength: 50 }],
   photoId: { type: ObjectId },
   createdBy: { type: ObjectId },
 });
@@ -132,7 +134,7 @@ export const MealPlan = mk('MealPlan', {
   familyId: { type: ObjectId, required: true },
   date: { type: String, required: true },
   slot: { type: String, enum: ['morning', 'noon', 'night'], required: true },
-  items: [{ type: String, maxlength: 80 }],
+  items: [{ type: String, maxlength: 120 }],
   recipeId: { type: ObjectId },
   cookId: { type: ObjectId },
   attendance: [new Schema({ memberId: ObjectId, status: { type: String, enum: ['in', 'out'] } }, { _id: false })],

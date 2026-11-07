@@ -12,16 +12,30 @@ import { todayIn } from '../lib/dates.js';
 export const grocery = Router();
 const keyOf = (n) => n.trim().toLowerCase().replace(/\s+/g, ' ');
 
-export async function addNeeded(familyId, name, addedBy, qty) {
+export async function addNeeded(familyId, name, addedBy, qty, category, shop) {
   const nameKey = keyOf(name);
   const existing = await GroceryItem.findOne({ familyId, nameKey });
   if (existing) {
     existing.status = 'needed';
-    if (qty) existing.qty = qty;
+    if (qty) existing.qty = String(qty).slice(0, 60);
+    if (category) existing.category = String(category).slice(0, 50);
+    if (shop) existing.shop = String(shop).slice(0, 60);
     await existing.save();
     return { item: existing, created: false };
   }
-  return { item: await GroceryItem.create({ familyId, name: name.trim(), nameKey, qty, addedBy }), created: true };
+  return {
+    item: await GroceryItem.create({
+      familyId,
+      name: name.trim().slice(0, 140),
+      nameKey,
+      qty: (qty || '').slice(0, 60),
+      category: (category || 'other').slice(0, 50),
+      shop: (shop || 'Supermarket').slice(0, 60),
+      status: 'needed',
+      addedBy,
+    }),
+    created: true,
+  };
 }
 
 grocery.get('/', h(async (req, res) => {
