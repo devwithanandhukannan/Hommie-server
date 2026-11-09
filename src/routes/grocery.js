@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import { h, notFound } from '../lib/errors.js';
-import { validate, idParams, text, optText, money, ymd } from '../lib/validate.js';
+import { validate, idParams, text, optText, money, ymd, oid } from '../lib/validate.js';
 import { GroceryItem } from '../models/index.js';
 import { groceryDto } from '../dto.js';
 import { loadMembers } from '../services/members.js';
@@ -60,6 +60,45 @@ grocery.patch('/:id', validate({ params: idParams, body: z.object({ name: text(8
   await g.save();
   const { map } = await loadMembers(req.ctx.familyId);
   res.json(groceryDto(g, map));
+}));
+
+grocery.post('/bill', validate({
+  body: z.object({
+    amount: money,
+    itemIds: z.array(oid).min(1).max(100),
+    date: ymd.optional(),
+    note: optText(200).optional(),
+    paidById: oid.optional(),
+    equalAmong: z.array(oid).optional(),
+  }).strict(),
+}), h(async (req, res) => {
+  const { amount, itemIds, date, note, paidById, equalAmong } = req.valid.body;
+  const items = await GroceryItem.find({ _id: { $in: itemIds }, familyId: req.ctx.familyId });
+  const eachPrice = Math.round(amount / (items.length || 1));
+  for (const g of items) {
+    g.lastPrice = eachPrice;
+    await g.save();
+  }
+  const { ids } = await loadMembers(req.ctx.familyId);
+  const payer = paidById || req.ctx.me;
+  const billNote = note || `Grocery: ${items.map((i) => i.name).join(', ')}`.slice(0, 200);
+  const exp = await createExpense({
+    familyId: req.ctx.familyId,
+    amount,
+    category: 'grocery',
+    date: date || todayIn(req.ctx.family.timezone),
+    paidById: payer,
+    split: equalSplit(amount, equalAmong || ids),
+    note: billNote,
+    source: 'grocery',
+    createdBy: req.ctx.me,
+  });
+  await systemMessage(
+    req.ctx.familyId,
+    `Grocery bill recorded: ₹${Math.round(amount / 100)} for ${items.length} item${items.length === 1 ? '' : 's'} by ${req.ctx.membership.displayName}`,
+    { kind: 'grocery', title: 'Grocery bill' }
+  );
+  res.status(201).json({ success: true, expenseId: exp._id });
 }));
 
 grocery.post('/:id/bought', validate({ params: idParams, body: z.object({ price: money.optional(), date: ymd.optional() }).strict().optional().default({}) }), h(async (req, res) => {

@@ -50,5 +50,5 @@ export const config = {
   maxDocBytes: 4 * 1024 * 1024,
   familyDocQuotaBytes: 80 * 1024 * 1024,
   defaultTimezone: e.DEFAULT_TIMEZONE || 'Asia/Kolkata',
-  geminiApiKey: e.GEMINI_API_KEY || Buffer.from('QVEuQWI4Uk42SmxlRVN3NUNRNk5Gb2JBanVGX3BpdDRRVHpvelZtNUljdmhNd1dHcG5wcnc=', 'base64').toString('utf8'),
+  geminiApiKey: e.GEMINI_API_KEY || '',
 };
