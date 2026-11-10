@@ -3,13 +3,14 @@ import assert from 'node:assert/strict';
 import zlib from 'node:zlib';
 import { EventEmitter } from 'node:events';
 import mongoose from 'mongoose';
-import { Expense, Settlement, Notification, User, Session } from '../src/models/index.js';
+import { Expense, Settlement, Notification, User, Session, Recipe, Membership } from '../src/models/index.js';
 import { computeFamilyBalances, monthlyExpenseSummary } from '../src/services/expenses.js';
 import { compressJson } from '../src/middleware/compress.js';
 import { subscribeSse, publishToUsers, publishFamilyChange } from '../src/services/events.js';
 import { getCachedAiContext, setCachedAiContext } from '../src/services/aiCache.js';
 import { signAccess } from '../src/lib/tokens.js';
 import { me } from '../src/routes/auth.js';
+import { recipes } from '../src/routes/meals.js';
 
 function patchMethod(obj, key, replacement, restorers) {
   const orig = obj[key];
@@ -219,6 +220,67 @@ test('me notification pagination (?before, hasMore) and clear read endpoints wor
     const clearRes = await invokeMe('DELETE', '/notifications', {});
     assert.equal(clearRes.statusCode, 204);
     assert.deepEqual(deletedFilter, { userId: USER_ID, readAt: { $ne: null } });
+  } finally {
+    restorers.reverse().forEach((fn) => fn());
+  }
+});
+
+test('POST and PATCH /recipes accept detailed AI-length ingredients, steps, tags, and titles', async () => {
+  const restorers = [];
+  const FAM = '660000000000000000000071';
+  const ME = '660000000000000000000072';
+  const REC_ID = '660000000000000000000073';
+  const longTitle = 'A'.repeat(120);
+  const longIngName = 'Freshly ground roasted Kashmiri red chilli and coriander spice blend'.padEnd(110, 'x');
+  const longQty = '2 heaped tablespoons plus extra for tempering'.padEnd(55, ' ');
+  const longStep = 'Saute onions slowly on medium heat for 12 minutes until deeply golden brown and aromatic. '.repeat(9).trim();
+
+  const ctx = {
+    familyId: FAM,
+    me: ME,
+    membership: { _id: ME, displayName: 'Dhanya', role: 'admin' },
+  };
+  const invokeRecipes = (method, url, body) => new Promise((resolve, reject) => {
+    const req = { method, url, originalUrl: url, baseUrl: '', headers: {}, query: {}, params: {}, body, ctx };
+    const res = {
+      statusCode: 200,
+      status(c) { this.statusCode = c; return this; },
+      json(d) { this.body = d; resolve(this); return this; },
+      end() { resolve(this); return this; },
+    };
+    recipes(req, res, (err) => (err ? reject(err) : resolve(res)));
+  });
+
+  try {
+    patchMethod(Membership, 'find', () => ({
+      sort: async () => [{ _id: ME, displayName: 'Dhanya', relation: 'mother', role: 'admin', color: '#0B6B5D', userId: 'u1' }],
+    }), restorers);
+
+    let savedDoc = null;
+    patchMethod(Recipe, 'create', async (doc) => {
+      savedDoc = {
+        _id: REC_ID,
+        ...doc,
+        async save() { return this; },
+      };
+      return savedDoc;
+    }, restorers);
+    patchMethod(Recipe, 'findOne', async () => savedDoc, restorers);
+
+    const created = await invokeRecipes('POST', '/', {
+      title: longTitle,
+      ingredients: [{ name: longIngName, qty: longQty.trim() }],
+      steps: [longStep],
+      tags: ['AI Suggested', 'Traditional Kerala Feast Dish'],
+    });
+    assert.equal(created.statusCode, 201);
+    assert.equal(created.body.steps[0].length, longStep.length);
+
+    const patched = await invokeRecipes('PATCH', `/${REC_ID}`, {
+      steps: [longStep, `${longStep.slice(0, 800)}`],
+    });
+    assert.equal(patched.statusCode, 200);
+    assert.equal(patched.body.steps.length, 2);
   } finally {
     restorers.reverse().forEach((fn) => fn());
   }

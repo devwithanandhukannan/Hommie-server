@@ -66,10 +66,10 @@ meals.delete('/:date/:slot', validate({ params: slotParams }), h(async (req, res
 
 // ---------- recipes ----------
 const recipeBody = z.object({
-  title: text(100),
-  ingredients: z.array(z.object({ name: text(80), qty: optText(30) }).strict()).max(60).default([]),
-  steps: z.array(text(600)).max(40).default([]),
-  tags: z.array(text(24)).max(8).default([]),
+  title: text(140),
+  ingredients: z.array(z.object({ name: text(120), qty: optText(60) }).strict()).max(60).default([]),
+  steps: z.array(text(1000)).max(60).default([]),
+  tags: z.array(text(50)).max(10).default([]),
   photoId: oid.nullable().optional(),
 }).strict();
 
