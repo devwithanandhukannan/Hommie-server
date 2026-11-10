@@ -6,6 +6,7 @@ import { Medicine, MedicineLog, Membership } from '../models/index.js';
 import { medicineDto, canSeeMedicine } from '../dto.js';
 import { loadMembers, pick } from '../services/members.js';
 import { todayIn, timeIn, weekday, addDays } from '../lib/dates.js';
+import { notify, userIdsOf } from '../services/push.js';
 
 // Medicine details are visible only to the person the medicine is for, their caregivers and whoever added it (not to admins).
 export const medicines = Router();
@@ -57,7 +58,24 @@ medicines.post('/', validate({ body: shape }), h(async (req, res) => {
   const { caregiverIds, ...b } = req.valid.body;
   await checkMembers(req.ctx.familyId, [b.forId, ...caregiverIds]);
   const m = await Medicine.create({ ...b, caregivers: caregiverIds, familyId: req.ctx.familyId, createdBy: req.ctx.me });
-  const { map } = await loadMembers(req.ctx.familyId);
+  const { docs, map } = await loadMembers(req.ctx.familyId);
+  const targetSet = new Set([String(b.forId), ...caregiverIds.map(String)].filter((id) => id !== req.ctx.me));
+  const userIds = targetSet.size ? userIdsOf(docs.filter((d) => targetSet.has(String(d._id)))) : [];
+  if (userIds.length) {
+    await notify({
+      userIds,
+      familyId: req.ctx.familyId,
+      type: 'medicine_added',
+      url: '/medicine',
+      i18nKey: 'medicine_added',
+      params: {
+        by: req.ctx.membership.displayName,
+        forName: map.get(String(b.forId))?.displayName || 'Member',
+        name: m.name,
+        times: m.times.join(', '),
+      },
+    });
+  }
   res.status(201).json(medicineDto(m, map));
 }));
 

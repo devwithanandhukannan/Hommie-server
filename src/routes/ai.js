@@ -29,6 +29,7 @@ import {
 import { analyzeWithGemini, agenticFamilyAssistant } from '../services/ai.js';
 import { loadMembers } from '../services/members.js';
 import { createExpense, equalSplit } from '../services/expenses.js';
+import { notify, otherFamilyUserIds } from '../services/push.js';
 
 export const ai = Router();
 
@@ -392,6 +393,8 @@ ai.post(
     let lastCreatedRecipeId = null;
     let scheduledMealInfo = null;
     let addedGroceryCount = 0;
+    const addedGroceries = [];
+    const createdTasks = [];
     const shopsInvolved = new Set();
 
     for (const a of actions) {
@@ -427,6 +430,7 @@ ai.post(
         }
         if (item.imageUrl == null) attachImageToItem(item);
         addedGroceryCount++;
+        addedGroceries.push({ name: safeTitle, qty: safeQty });
         shopsInvolved.add(safeShop);
         added.push({ type: 'grocery', id: String(item._id), title: safeTitle, shop: safeShop });
       } else if (a.type === 'recipe' || a.type === 'add_recipe') {
@@ -488,6 +492,7 @@ ai.post(
           dueDate: eventDate,
           status: 'open',
         });
+        createdTasks.push(task);
         added.push({
           type: 'calendar',
           id: String(task._id),
@@ -506,6 +511,7 @@ ai.post(
           dueDate: goodDate(a.dueDate, undefined),
           status: 'open',
         });
+        createdTasks.push(task);
         added.push({ type: 'task', id: String(task._id), title: safeTitle });
       } else if (a.type === 'delete_task' && a.targetId) {
         const target = await Task.findOne({ _id: a.targetId, familyId });
@@ -549,7 +555,69 @@ ai.post(
           createdBy: me,
           status: 'open',
         });
+        createdTasks.push(task);
         added.push({ type: 'task', id: String(task._id), title: safeTitle });
+      }
+    }
+
+    // Send localized push & in-app notifications for grocery additions and created tasks.
+    if (addedGroceries.length > 0 || createdTasks.length > 0) {
+      try {
+        const needFamilyUsers = addedGroceries.length > 0 || createdTasks.some((t) => !t.assigneeId);
+        const otherUserIds = needFamilyUsers ? await otherFamilyUserIds(familyId, me) : [];
+        const by = req.ctx.membership.displayName;
+
+        if (addedGroceries.length === 1 && otherUserIds.length) {
+          await notify({
+            userIds: otherUserIds,
+            familyId,
+            type: 'grocery',
+            url: '/grocery',
+            coalesce: true,
+            i18nKey: 'grocery_added',
+            params: { by, name: addedGroceries[0].name, qty: addedGroceries[0].qty },
+          });
+        } else if (addedGroceries.length > 1 && otherUserIds.length) {
+          const preview = addedGroceries.slice(0, 3).map((g) => g.name).join(', ')
+            + (addedGroceries.length > 3 ? ` (+${addedGroceries.length - 3})` : '');
+          await notify({
+            userIds: otherUserIds,
+            familyId,
+            type: 'grocery',
+            url: '/grocery',
+            coalesce: true,
+            i18nKey: 'grocery_batch',
+            params: { by, count: addedGroceries.length, preview },
+          });
+        }
+
+        for (const task of createdTasks) {
+          if (task.assigneeId) {
+            if (String(task.assigneeId) === me) continue;
+            const assigneeDoc = memberDocs.find((m) => String(m._id) === String(task.assigneeId));
+            if (assigneeDoc?.userId) {
+              await notify({
+                userIds: [assigneeDoc.userId],
+                familyId,
+                type: 'task',
+                url: '/tasks',
+                i18nKey: 'task_assigned',
+                params: { by, title: task.title },
+              });
+            }
+          } else if (otherUserIds.length) {
+            await notify({
+              userIds: otherUserIds,
+              familyId,
+              type: 'task',
+              url: '/tasks',
+              i18nKey: 'task_open',
+              params: { by, title: task.title },
+            });
+          }
+        }
+      } catch {
+        // ignore notification error
       }
     }
 

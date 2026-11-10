@@ -9,6 +9,7 @@ import { createExpense, equalSplit } from '../services/expenses.js';
 import { systemMessage } from '../services/chat.js';
 import { todayIn } from '../lib/dates.js';
 import { attachImageToItem, backfillMissingGroceryImages } from '../services/groceryImage.js';
+import { notify, otherFamilyUserIds } from '../services/push.js';
 
 export const grocery = Router();
 
@@ -73,8 +74,23 @@ grocery.get('/', h(async (req, res) => {
   res.json(items);
 }));
 
+async function tellGroceryAdded(req, item) {
+  const userIds = await otherFamilyUserIds(req.ctx.familyId, req.ctx.me);
+  if (!userIds.length) return;
+  await notify({
+    userIds,
+    familyId: req.ctx.familyId,
+    type: 'grocery',
+    url: '/grocery',
+    coalesce: true,
+    i18nKey: 'grocery_added',
+    params: { by: req.ctx.membership.displayName, name: item.name, qty: item.qty || '' },
+  });
+}
+
 grocery.post('/', validate({ body: z.object({ name: text(80), qty: optText(30) }).strict() }), h(async (req, res) => {
   const { item, created } = await addNeeded(req.ctx.familyId, req.valid.body.name, req.ctx.me, req.valid.body.qty, undefined, undefined, { awaitMs: 1600 });
+  await tellGroceryAdded(req, item);
   const { map } = await loadMembers(req.ctx.familyId);
   res.status(created ? 201 : 200).json(groceryDto(item, map));
 }));
@@ -191,6 +207,7 @@ grocery.post('/:id/need', validate({ params: idParams }), h(async (req, res) => 
     { new: true },
   );
   if (!g) throw notFound();
+  await tellGroceryAdded(req, g);
   const { map } = await loadMembers(req.ctx.familyId);
   res.json(groceryDto(g, map));
 }));

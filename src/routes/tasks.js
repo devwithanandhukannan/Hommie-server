@@ -5,7 +5,7 @@ import { validate, idParams, oid, ymd, text, optText } from '../lib/validate.js'
 import { Task, Membership } from '../models/index.js';
 import { taskDto } from '../dto.js';
 import { loadMembers } from '../services/members.js';
-import { notify } from '../services/push.js';
+import { notify, otherFamilyUserIds } from '../services/push.js';
 import { systemMessage } from '../services/chat.js';
 import { isAdmin } from '../middleware/auth.js';
 import { addDays, addMonths, todayIn } from '../lib/dates.js';
@@ -25,10 +25,31 @@ async function loadTask(req) {
   return t;
 }
 async function tell(req, task, assigneeId) {
-  if (!assigneeId || String(assigneeId) === req.ctx.me) return;
-  const m = await Membership.findById(assigneeId);
-  if (m?.userId) {
-    await notify({ userIds: [m.userId], familyId: req.ctx.familyId, type: 'task', url: '/tasks', title: `${req.ctx.membership.displayName} gave you a task`, body: task.title, pushBody: 'Open the app to see it' });
+  if (assigneeId) {
+    if (String(assigneeId) === req.ctx.me) return;
+    const m = await Membership.findById(assigneeId);
+    if (m?.userId) {
+      await notify({
+        userIds: [m.userId],
+        familyId: req.ctx.familyId,
+        type: 'task',
+        url: '/tasks',
+        i18nKey: 'task_assigned',
+        params: { by: req.ctx.membership.displayName, title: task.title },
+      });
+    }
+    return;
+  }
+  const userIds = await otherFamilyUserIds(req.ctx.familyId, req.ctx.me);
+  if (userIds.length) {
+    await notify({
+      userIds,
+      familyId: req.ctx.familyId,
+      type: 'task',
+      url: '/tasks',
+      i18nKey: 'task_open',
+      params: { by: req.ctx.membership.displayName, title: task.title },
+    });
   }
 }
 
@@ -86,6 +107,7 @@ tasks.patch('/:id', validate({
   if (t.kind === 'bill') throw badRequest('Bill tasks are managed from the bill');
   if (String(t.createdBy) !== req.ctx.me && !isAdmin(req)) throw forbidden('Only the creator or an admin can edit this task');
   const { dueDate, assigneeId, status, ...rest } = req.valid.body;
+  const prevAssignee = t.assigneeId ? String(t.assigneeId) : null;
   Object.assign(t, rest);
   if (dueDate !== undefined) t.dueDate = dueDate || undefined;
   if (assigneeId !== undefined) {
@@ -103,6 +125,9 @@ tasks.patch('/:id', validate({
     }
   }
   await t.save();
+  if (t.status === 'open' && assigneeId !== undefined && (t.assigneeId ? String(t.assigneeId) : null) !== prevAssignee) {
+    await tell(req, t, t.assigneeId);
+  }
   const { map } = await loadMembers(req.ctx.familyId);
   res.json(taskDto(t, map));
 }));
