@@ -119,6 +119,7 @@ export const GroceryItem = mk('GroceryItem', {
   lastBoughtAt: { type: Date },
   lastPrice: { type: Number },
   buyDates: [{ type: Date }],
+  unbilled: { type: Boolean, default: false },
   // URL string only (no image bytes/base64 saved in DB). null = unchecked, '' = checked miss, 'https://...' = valid URL.
   imageUrl: { type: String, maxlength: 500, default: null },
 }, [[{ familyId: 1, nameKey: 1 }, { unique: true }]]);

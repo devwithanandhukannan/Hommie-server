@@ -90,35 +90,40 @@ function formatContext(context = {}) {
 - Current Month Expenses: ₹${context.monthlyExpenseTotal || 0} (${expensesBreakdown})`;
 }
 
-const COMPOUND_PROMPT = `You are Hommi AI, a friendly, intelligent, proactive family assistant for households in Kerala and India.
-Family members communicate in Malayalam, Manglish (Malayalam in English script), English, Tamil, or Hindi.
-Respond in the language the user used (default to natural Malayalam/Manglish if Malayalam was used, or English if English was used).
+const COMPOUND_PROMPT = `You are Hommi AI, a friendly, intelligent household assistant.
+
+LANGUAGE RULE (CRITICAL — ALWAYS OBEY):
+- ALWAYS respond in the EXACT language the user wrote or spoke in THIS LATEST message/audio.
+- Ignore the app UI language setting and ignore the language of earlier turns in conversation history if the current message uses a different language.
+- If the user wrote/spoke English -> respond 100% in English (reply, ingredient names, step text, shop names, headings, and suggestedChips MUST all be English).
+- If the user wrote/spoke Malayalam (Malayalam script or Manglish) -> respond in natural Malayalam.
+- If the user wrote/spoke Tamil or Hindi -> respond in Tamil or Hindi respectively.
 
 CRITICAL HOUSEHOLD RULES:
 1. Multi-Intent Compound Handling:
-   When user asks to prepare or cook a dish (e.g. "suggest biryani recipe, add to recipe, add tomorrow meals, and add grocery list grouped by shop..."):
-   a) Suggest the recipe clearly in your reply with key ingredients and simple steps.
-   b) Action "add_recipe": create recipe with title, ingredients list ({ name, qty }), and steps array.
+   When user asks to prepare or cook a dish (e.g. "how to make biryani", "suggest biryani recipe, add to recipe, add tomorrow meals, and add grocery list..."):
+   a) Suggest the recipe clearly in your reply with key ingredients and numbered steps (include realistic duration for every cooking step, e.g., "Marinate chicken for 30 min", "Sauté onions (~10 min)").
+   b) Action "add_recipe": create recipe with title, ingredients list ({ name, qty }), and steps array (each step including realistic cooking time).
    c) Action "add_meal": schedule the meal (e.g. for tomorrow date, slot "noon" or "night", cookName matching one of the Family Members).
    d) Action "add_calendar_event": schedule a calendar reminder for the meal with dueDate and assigneeName tagged.
    e) Action "add_grocery": break down missing ingredients into individual items (concise item titles under 60 chars, NEVER giant strings in title).
-      Cross-check against Kitchen Inventory! If an ingredient is already in stock, mention in reply that it is already in the kitchen, and only add missing ones.
-      SHOP GROUPING: Assign realistic shop names based on Kerala/Indian shopping habits:
-      - "Vegetable Stall" (പച്ചക്കറി കട): Onions, tomatoes, green chillies, ginger, garlic, coriander, mint, vegetables.
-      - "Meat & Poultry Stall" (ഇറച്ചി / മീൻ കട): Chicken, mutton, beef, fish, seafood.
-      - "Supermarket / Grocery" (പലചരക്ക് കട): Basmati/Kaima rice, ghee, curd, whole spices, biryani masala, dry fruits, grocery essentials.
-      - "Dairy & Bakery" (ബേക്കറി / മിൽമ): Milk, bread, eggs.
-      - "Medical Store" (മെഡിക്കൽ സ്റ്റോർ): Tablets, medicines.
+      Cross-check against Kitchen Inventory! For in-stock ingredients in the reply, mark them cleanly as "(Already available in your kitchen)" (or local language equivalent when responding in Malayalam/Hindi/Tamil), and only add missing ones to grocery actions.
+      SHOP GROUPING: Assign realistic shop names matching the reply language:
+      - "Vegetable Stall": Onions, tomatoes, green chillies, ginger, garlic, coriander, mint, vegetables.
+      - "Meat & Poultry Stall": Chicken, mutton, beef, fish, seafood.
+      - "Supermarket / Grocery": Basmati/Kaima rice, ghee, curd, whole spices, biryani masala, dry fruits, grocery essentials.
+      - "Dairy & Bakery": Milk, bread, eggs.
+      - "Medical Store": Tablets, medicines.
       Assign intelligent category ("vegetables", "meat", "spices", "dairy", "pantry", "household", "medical", "other").
 
 2. Single Intent & Queries:
-   - "What to buy? / എന്തൊക്കെ വാങ്ങാനുണ്ട്?": Summarize Needed Groceries.
-   - "What's in my kitchen? / അടുക്കളയിൽ എന്തൊക്കെയുണ്ട്?": Summarize in-stock items.
-   - "Monthly expense / ഈ മാസത്തെ ചിലവ്": Report ground-truth expense total and breakdown.
-   - "Tasks / ജോലികൾ": Summarize open tasks.
-   - "Add task / ജോലി": Action "add_task" with title, optional dueDate, optional assigneeName.
-   - "Delete task": Action "delete_task" with targetId matching the task ID.
-   - "Medicine / മരുന്ന്": Report medicine status.
+   - What to buy: Summarize Needed Groceries.
+   - What's in my kitchen: Summarize in-stock items.
+   - Monthly expense: Report ground-truth expense total and breakdown.
+   - Tasks: Summarize open tasks.
+   - Add task: Action "add_task" with title, optional dueDate, optional assigneeName.
+   - Delete task: Action "delete_task" with targetId matching the task ID.
+   - Medicine: Report medicine status.
 
 3. Formatting Rules:
    - Clean titles: titles must be concise item/task names (e.g. "Biryani Rice", "Chicken", "Onions"), NOT paragraphs.
@@ -129,7 +134,7 @@ OUTPUT FORMAT:
 Respond strictly in JSON without markdown codeblocks or backticks:
 {
   "transcription": "<spoken transcription or typed text>",
-  "reply": "<Friendly, clear explanation in user's language>",
+  "reply": "<Friendly, clear explanation in the SAME language as this latest user message>",
   "actions": [
     {
       "type": "add_grocery" | "add_task" | "delete_task" | "add_expense" | "add_meal" | "add_recipe" | "add_calendar_event" | "bill",
@@ -148,8 +153,68 @@ Respond strictly in JSON without markdown codeblocks or backticks:
       "steps": [ "<step 1>", "<step 2>" ]
     }
   ],
-  "suggestedChips": ["<short follow-up 1>", "<short follow-up 2>"]
+  "suggestedChips": ["<short follow-up 1 in same language>", "<short follow-up 2 in same language>"]
 }`;
+
+const MANGLISH_RE = /\b(entha|enthu|enthokke|engane|undakkam|cheyyam|evide|enna|aano|alle|vendath|vaangan|chilavu|veetil|chaya|kanji|choru|curry|ari|meen|irachi|pachakkari|innathe|naale|innale|ningal|njan|njammale)\b/i;
+
+function detectMessageLang(msg, fallback = 'en') {
+  const s = String(msg || '').trim();
+  if (!s) return fallback || 'en';
+  if (/[\u0D00-\u0D7F]/.test(s)) return 'ml';
+  if (/[\u0B80-\u0BFF]/.test(s)) return 'ta';
+  if (/[\u0900-\u097F]/.test(s)) return 'hi';
+  if (MANGLISH_RE.test(s)) return 'ml';
+  return 'en';
+}
+
+function languageDirective({ text = '', audioBuffer = null }) {
+  if (audioBuffer && audioBuffer.length > 0 && !String(text || '').trim()) {
+    return 'LANGUAGE INSTRUCTION: Detect the spoken language in this audio message (English, Malayalam, Tamil, Hindi, etc.) and write "reply", "ingredients", "steps", and "suggestedChips" strictly in that same spoken language.';
+  }
+  const detected = detectMessageLang(text);
+  const label = detected === 'ml'
+    ? 'Malayalam (user wrote Malayalam/Manglish)'
+    : detected === 'ta'
+    ? 'Tamil'
+    : detected === 'hi'
+    ? 'Hindi'
+    : 'English (user wrote English — reply 100% in English, NOT Malayalam)';
+  return `LANGUAGE INSTRUCTION: Respond strictly in ${label}.`;
+}
+
+function fallbackResponse(kind, lang) {
+  if (lang === 'ml') {
+    return {
+      reply: kind === 'error'
+        ? 'ക്ഷമിക്കണം, എഐ പ്രോസസ്സ് ചെയ്യുന്നതിൽ തടസ്സമുണ്ടായി. ദയവായി വീണ്ടും ശ്രമിക്കുക.'
+        : 'ക്ഷമിക്കണം, എനിക്ക് അത് മനസ്സിലാക്കാൻ സാധിച്ചില്ല. ദയവായി ഒന്നുകൂടി പറയാമോ?',
+      chips: ['എന്തൊക്കെ വാങ്ങാനുണ്ട്?', 'ഈ മാസത്തെ ചിലവ് എത്ര?'],
+    };
+  }
+  if (lang === 'hi') {
+    return {
+      reply: kind === 'error'
+        ? 'माफ़ कीजिए, अनुरोध प्रोसेस करने में समस्या हुई। कृपया फिर से कोशिश करें।'
+        : 'माफ़ कीजिए, मैं इसे समझ नहीं पाया। कृपया दोबारा कहें?',
+      chips: ['क्या खरीदना है?', 'इस महीने का खर्च'],
+    };
+  }
+  if (lang === 'ta') {
+    return {
+      reply: kind === 'error'
+        ? 'மன்னிக்கவும், கோரிக்கையை செயல்படுத்த முடியவில்லை. மீண்டும் முயற்சிக்கவும்.'
+        : 'மன்னிக்கவும், அதை புரிந்துகொள்ள முடியவில்லை. மீண்டும் சொல்ல முடியுமா?',
+      chips: ['என்ன வாங்க வேண்டும்?', 'இந்த மாத செலவு'],
+    };
+  }
+  return {
+    reply: kind === 'error'
+      ? 'Sorry, I could not process that request right now. Please try again.'
+      : 'Sorry, I could not understand that. Could you rephrase it?',
+    chips: ['What to buy?', 'Monthly expenses'],
+  };
+}
 
 /**
  * Analyzes text or raw audio buffer using Gemini.
@@ -157,6 +222,8 @@ Respond strictly in JSON without markdown codeblocks or backticks:
 export async function analyzeWithGemini({ text, audioBuffer, mimeType = 'audio/webm', context = {} }) {
   const parts = [];
   const ctxString = formatContext(context);
+  const langRule = languageDirective({ text, audioBuffer });
+  const fbLang = detectMessageLang(text, context.uiLang || 'en');
 
   if (audioBuffer && audioBuffer.length > 0) {
     const cleanMime = (mimeType || 'audio/webm').split(';')[0].trim();
@@ -167,11 +234,11 @@ export async function analyzeWithGemini({ text, audioBuffer, mimeType = 'audio/w
       },
     });
     parts.push({
-      text: `${COMPOUND_PROMPT}\n\n${ctxString}\n\nListen carefully to this audio voice note from a family member and extract actionable household tasks into JSON:`,
+      text: `${COMPOUND_PROMPT}\n\n${ctxString}\n\n${langRule}\nListen carefully to this audio voice note from a family member and extract actionable household tasks into JSON:`,
     });
   } else if (text && text.trim().length > 0) {
     parts.push({
-      text: `${COMPOUND_PROMPT}\n\n${ctxString}\n\nAnalyze this message from a family member and extract actionable household tasks into JSON:\n"${text.trim()}"`,
+      text: `${COMPOUND_PROMPT}\n\n${ctxString}\n\n${langRule}\nAnalyze this message from a family member and extract actionable household tasks into JSON:\n"${text.trim()}"`,
     });
   } else {
     throw new Error('Either text or audio is required for AI analysis');
@@ -182,11 +249,13 @@ export async function analyzeWithGemini({ text, audioBuffer, mimeType = 'audio/w
     const result = cleanJson(rawResult);
 
     if (!result || typeof result !== 'object') {
+      const fb = fallbackResponse('parse', fbLang);
       return {
         transcription: text || '',
-        summary: 'Could not extract actions from this message',
-        reply: 'Could not extract actions from this message',
+        summary: fb.reply,
+        reply: fb.reply,
         actions: [],
+        suggestedChips: fb.chips,
       };
     }
 
@@ -201,12 +270,13 @@ export async function analyzeWithGemini({ text, audioBuffer, mimeType = 'audio/w
     };
   } catch (err) {
     console.error('[Gemini AI analyze error]:', err?.message);
+    const fb = fallbackResponse('error', fbLang);
     return {
       transcription: text || '',
-      summary: 'ക്ഷമിക്കണം, എഐ പ്രോസസ്സ് ചെയ്യുന്നതിൽ തടസ്സമുണ്ടായി. ദയവായി വീണ്ടും ശ്രമിക്കുക.',
-      reply: 'ക്ഷമിക്കണം, എഐ പ്രോസസ്സ് ചെയ്യുന്നതിൽ തടസ്സമുണ്ടായി. ദയവായി വീണ്ടും ശ്രമിക്കുക.',
+      summary: fb.reply,
+      reply: fb.reply,
       actions: [],
-      suggestedChips: ['എന്തൊക്കെ വാങ്ങാനുണ്ട്?', 'ഈ മാസത്തെ ചിലവ് എത്ര?'],
+      suggestedChips: fb.chips,
     };
   }
 }
@@ -217,10 +287,12 @@ export async function analyzeWithGemini({ text, audioBuffer, mimeType = 'audio/w
 export async function agenticFamilyAssistant({ message = '', audioBuffer, mimeType = 'audio/webm', context = {}, history = [] }) {
   const parts = [];
   const ctxString = formatContext(context);
+  const langRule = languageDirective({ text: message, audioBuffer });
+  const fbLang = detectMessageLang(message, context.uiLang || 'en');
 
   let histText = '';
   if (history.length > 0) {
-    histText = `\nRecent Conversation History:\n${history.map((h) => `${h.role === 'user' ? 'User' : 'Assistant'}: ${h.content}`).join('\n')}\n`;
+    histText = `\nRecent Conversation History (for topic context only; always follow THIS latest message's language):\n${history.map((h) => `${h.role === 'user' ? 'User' : 'Assistant'}: ${h.content}`).join('\n')}\n`;
   }
 
   if (audioBuffer && audioBuffer.length > 0) {
@@ -232,11 +304,11 @@ export async function agenticFamilyAssistant({ message = '', audioBuffer, mimeTy
       },
     });
     parts.push({
-      text: `${COMPOUND_PROMPT}\n\n${ctxString}${histText}\n\nListen carefully to this voice note from the user and respond in JSON:`,
+      text: `${COMPOUND_PROMPT}\n\n${ctxString}${histText}\n${langRule}\nListen carefully to this voice note from the user and respond in JSON:`,
     });
   } else {
     parts.push({
-      text: `${COMPOUND_PROMPT}\n\n${ctxString}${histText}\nUser Message: "${(message || '').trim()}"\n\nRespond in JSON:`,
+      text: `${COMPOUND_PROMPT}\n\n${ctxString}${histText}\n${langRule}\nUser Message: "${(message || '').trim()}"\n\nRespond in JSON:`,
     });
   }
 
@@ -245,11 +317,12 @@ export async function agenticFamilyAssistant({ message = '', audioBuffer, mimeTy
     const result = cleanJson(rawResult);
 
     if (!result || typeof result !== 'object') {
+      const fb = fallbackResponse('parse', fbLang);
       return {
         transcription: '',
-        reply: 'ക്ഷമിക്കണം, എനിക്ക് അത് മനസ്സിലാക്കാൻ സാധിച്ചില്ല. ദയവായി ഒന്നുകൂടി പറയാമോ?',
+        reply: fb.reply,
         actions: [],
-        suggestedChips: ['എന്തൊക്കെ വാങ്ങാനുണ്ട്?', 'ഈ മാസത്തെ ചിലവ് എത്ര?'],
+        suggestedChips: fb.chips,
       };
     }
 
@@ -261,11 +334,12 @@ export async function agenticFamilyAssistant({ message = '', audioBuffer, mimeTy
     };
   } catch (err) {
     console.error('[Gemini AI agent error]:', err?.message);
+    const fb = fallbackResponse('error', fbLang);
     return {
       transcription: '',
-      reply: 'ക്ഷമിക്കണം, എഐ പ്രോസസ്സ് ചെയ്യുന്നതിൽ തടസ്സമുണ്ടായി. ദയവായി വീണ്ടും ശ്രമിക്കുക.',
+      reply: fb.reply,
       actions: [],
-      suggestedChips: ['എന്തൊക്കെ വാങ്ങാനുണ്ട്?', 'ഈ മാസത്തെ ചിലവ് എത്ര?'],
+      suggestedChips: fb.chips,
     };
   }
 }

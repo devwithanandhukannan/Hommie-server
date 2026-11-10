@@ -191,6 +191,7 @@ ai.post(
     }
 
     const context = await buildFamilyContext(req.ctx.family, req.ctx.me);
+    context.uiLang = req.ctx.user?.language || 'en';
 
     const agentResponse = await agenticFamilyAssistant({
       message: message || '',
@@ -244,6 +245,7 @@ ai.post(
     }
 
     const context = await buildFamilyContext(req.ctx.family, req.ctx.me);
+    context.uiLang = req.ctx.user?.language || 'en';
     const result = await analyzeWithGemini({ text, audioBuffer, mimeType, context });
     res.json(result);
   })
@@ -355,6 +357,7 @@ ai.post(
         let item = await GroceryItem.findOne({ familyId, nameKey });
         if (item) {
           item.status = 'needed';
+          item.unbilled = false;
           if (safeQty) item.qty = safeQty;
           if (safeCat) item.category = safeCat;
           if (safeShop) item.shop = safeShop;

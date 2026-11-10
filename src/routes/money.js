@@ -71,6 +71,7 @@ expenses.patch('/:id', validate({
     const memberIds = (e.split || []).map((s) => s.memberId);
     e.amount = b.amount;
     e.split = equalSplit(b.amount, memberIds.length ? memberIds : [e.paidById]);
+    e.markModified('split');
   }
   await e.save();
   const { map } = await loadMembers(req.ctx.familyId);
