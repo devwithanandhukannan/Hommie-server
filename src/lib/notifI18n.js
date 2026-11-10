@@ -62,6 +62,18 @@ const TEMPLATES = {
     ta: (p) => ({ title: `${p.by} அனைவருக்கும் ஒரு பணியைச் சேர்த்தார்`, body: p.title, pushBody: 'பார்க்க அல்லது ஏற்க செயலியைத் திறக்கவும்' }),
     hi: (p) => ({ title: `${p.by} ने सभी के लिए एक कार्य जोड़ा`, body: p.title, pushBody: 'देखने या लेने के लिए ऐप खोलें' }),
   },
+  task_due_today: {
+    en: (p) => ({ title: `Task due today: ${p.title}`, body: p.dueDate, pushBody: 'Open the app to complete it' }),
+    ml: (p) => ({ title: `ഇന്ന് ചെയ്യേണ്ട ജോലി: ${p.title}`, body: p.dueDate, pushBody: 'പൂർത്തിയാക്കാൻ ആപ്പ് തുറക്കുക' }),
+    ta: (p) => ({ title: `இன்று முடிக்க வேண்டிய பணி: ${p.title}`, body: p.dueDate, pushBody: 'முடிக்க செயலியைத் திறக்கவும்' }),
+    hi: (p) => ({ title: `आज का कार्य: ${p.title}`, body: p.dueDate, pushBody: 'पूरा करने के लिए ऐप खोलें' }),
+  },
+  task_overdue: {
+    en: (p) => ({ title: `Overdue task: ${p.title}`, body: `Was due ${p.dueDate}`, pushBody: 'Open the app to take care of it' }),
+    ml: (p) => ({ title: `സമയം കഴിഞ്ഞ ജോലി: ${p.title}`, body: `അവസാന തീയതി: ${p.dueDate}`, pushBody: 'കാണാൻ ആപ്പ് തുറക്കുക' }),
+    ta: (p) => ({ title: `காலாவதியான பணி: ${p.title}`, body: `கடைசி தேதி: ${p.dueDate}`, pushBody: 'பார்க்க செயலியைத் திறக்கவும்' }),
+    hi: (p) => ({ title: `लंबित कार्य: ${p.title}`, body: `अंतिम तिथि: ${p.dueDate}`, pushBody: 'देखने के लिए ऐप खोलें' }),
+  },
 };
 
 function translateLegacyString(raw, lang) {

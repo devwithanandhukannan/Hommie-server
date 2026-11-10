@@ -6,7 +6,7 @@ import { Expense, Settlement, Membership, Bill, GroceryItem } from '../models/in
 import { EXPENSE_CATEGORIES } from '../models/index.js';
 import { expenseDto, settlementDto, billDto } from '../dto.js';
 import { loadMembers, pick } from '../services/members.js';
-import { createExpense, equalSplit, computeBalances, simplifyDebts } from '../services/expenses.js';
+import { createExpense, equalSplit, computeFamilyBalances, monthlyExpenseSummary, simplifyDebts } from '../services/expenses.js';
 import { isAdmin } from '../middleware/auth.js';
 import { todayIn, addMonths } from '../lib/dates.js';
 
@@ -92,10 +92,10 @@ expenses.delete('/:id', validate({ params: idParams }), h(async (req, res) => {
 
 // ---------- wallet & settlements ----------
 async function balances(req) {
-  const [ex, st, members] = await Promise.all([
-    Expense.find({ familyId: req.ctx.familyId }).limit(20000), Settlement.find({ familyId: req.ctx.familyId }).limit(5000), loadMembers(req.ctx.familyId),
+  const [net, members] = await Promise.all([
+    computeFamilyBalances(req.ctx.familyId),
+    loadMembers(req.ctx.familyId),
   ]);
-  const net = computeBalances(ex, st);
   for (const id of members.ids) if (!net.has(id)) net.set(id, 0);
   return { net, map: members.map };
 }
@@ -142,30 +142,15 @@ wallet.post('/settlements', validate({ body: z.object({ toId: oid, fromId: oid.o
 // ---------- reports ----------
 reports.get('/monthly', validate({ query: z.object({ month: ym.optional() }).strict() }), h(async (req, res) => {
   const month = req.valid.query.month || todayIn(req.ctx.family.timezone).slice(0, 7);
-  const [cur, prev, members] = await Promise.all([
-    Expense.find({ familyId: req.ctx.familyId, date: monthRange(month) }).limit(5000),
-    Expense.find({ familyId: req.ctx.familyId, date: monthRange(prevMonth(month)) }).limit(5000),
+  const [summary, members] = await Promise.all([
+    monthlyExpenseSummary(req.ctx.familyId, month, prevMonth(month)),
     loadMembers(req.ctx.familyId),
   ]);
-  const total = cur.reduce((a, e) => a + e.amount, 0);
-  const lastTotal = prev.reduce((a, e) => a + e.amount, 0);
-  const byCat = new Map();
-  const byMember = new Map();
-  for (const e of cur) {
-    byCat.set(e.category, (byCat.get(e.category) || 0) + e.amount);
-    const p = byMember.get(String(e.paidById)) || { paid: 0, share: 0 };
-    p.paid += e.amount;
-    byMember.set(String(e.paidById), p);
-    for (const s of e.split) {
-      const q = byMember.get(String(s.memberId)) || { paid: 0, share: 0 };
-      q.share += s.share;
-      byMember.set(String(s.memberId), q);
-    }
-  }
+  const { total, lastTotal, byCategory, byMemberMap } = summary;
   res.json({
     month, total,
-    byCategory: [...byCat].map(([category, t]) => ({ category, total: t })).sort((a, b) => b.total - a.total),
-    byMember: [...byMember].map(([id, v]) => ({ member: pick(members.map, id), ...v })),
+    byCategory,
+    byMember: [...byMemberMap].map(([id, v]) => ({ member: pick(members.map, id), ...v })),
     vsLastMonth: { lastTotal, changePercent: lastTotal ? Math.round(((total - lastTotal) / lastTotal) * 100) : null },
   });
 }));

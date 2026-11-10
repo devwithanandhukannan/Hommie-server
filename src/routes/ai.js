@@ -30,6 +30,9 @@ import { analyzeWithGemini, agenticFamilyAssistant } from '../services/ai.js';
 import { loadMembers } from '../services/members.js';
 import { createExpense, equalSplit } from '../services/expenses.js';
 import { notify, otherFamilyUserIds } from '../services/push.js';
+import { getCachedAiContext, setCachedAiContext, invalidateAiContextCache } from '../services/aiCache.js';
+
+export { invalidateAiContextCache };
 
 export const ai = Router();
 
@@ -40,18 +43,6 @@ const aiAudioUpload = multer({
   limits: { fileSize: 4 * 1024 * 1024, files: 1, fields: 8, fieldSize: 32_768 },
 });
 
-const CONTEXT_TTL_MS = 20_000;
-const CONTEXT_MAX_ENTRIES = 200;
-const contextCache = new Map();
-
-/** Invalidates cached AI ground-truth context for a family after mutations. */
-export function invalidateAiContextCache(familyId) {
-  const prefix = `${String(familyId)}:`;
-  for (const k of contextCache.keys()) {
-    if (k.startsWith(prefix)) contextCache.delete(k);
-  }
-}
-
 /**
  * Builds live family ground-truth context for AI using parallel DB queries,
  * server-side expense aggregation, and a short per-(family, member) TTL cache.
@@ -59,10 +50,8 @@ export function invalidateAiContextCache(familyId) {
 export async function buildFamilyContext(family, me) {
   const familyId = String(family._id);
   const cacheKey = `${familyId}:${String(me)}`;
-  const cached = contextCache.get(cacheKey);
-  if (cached && cached.expiresAt > Date.now()) {
-    return cached.value;
-  }
+  const cached = getCachedAiContext(cacheKey);
+  if (cached) return cached;
 
   const todayStr = todayIn(family.timezone);
   const tomorrowStr = addDays(todayStr, 1);
@@ -165,11 +154,7 @@ export async function buildFamilyContext(family, me) {
     upcomingBills,
   };
 
-  if (contextCache.size >= CONTEXT_MAX_ENTRIES) {
-    const oldest = contextCache.keys().next().value;
-    if (oldest) contextCache.delete(oldest);
-  }
-  contextCache.set(cacheKey, { value: ctx, expiresAt: Date.now() + CONTEXT_TTL_MS });
+  setCachedAiContext(cacheKey, ctx);
   return ctx;
 }
 

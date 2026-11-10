@@ -3,7 +3,7 @@ import bcrypt from 'bcryptjs';
 import { z } from 'zod';
 import { config } from '../config.js';
 import { h, HttpError, unauthorized, conflict, badRequest, notFound } from '../lib/errors.js';
-import { validate, idParams, text } from '../lib/validate.js';
+import { validate, idParams, oid, text } from '../lib/validate.js';
 import crypto from 'node:crypto';
 import { randomToken, sha256, safeEqual } from '../lib/crypto.js';
 import { signAccess } from '../lib/tokens.js';
@@ -268,10 +268,19 @@ export async function deleteFamilyData(familyId) {
   await allModels.Family.deleteOne({ _id: familyId });
 }
 
-me.get('/notifications', h(async (req, res) => {
-  const list = await Notification.find({ userId: req.ctx.user._id }).sort({ _id: -1 }).limit(40);
-  const unread = await Notification.countDocuments({ userId: req.ctx.user._id, readAt: null });
-  res.json({ unread, items: list.map(notificationDto) });
+me.get('/notifications', validate({
+  query: z.object({ before: oid.optional(), limit: z.coerce.number().int().min(1).max(60).default(40) }).strict(),
+}), h(async (req, res) => {
+  const { before, limit } = req.valid.query;
+  const filter = { userId: req.ctx.user._id };
+  if (before) filter._id = { $lt: before };
+  const [rows, unread] = await Promise.all([
+    Notification.find(filter).sort({ _id: -1 }).limit(limit + 1).lean(),
+    Notification.countDocuments({ userId: req.ctx.user._id, readAt: null }),
+  ]);
+  const hasMore = rows.length > limit;
+  const items = hasMore ? rows.slice(0, limit) : rows;
+  res.json({ unread, items: items.map(notificationDto), hasMore });
 }));
 me.post('/notifications/read-all', h(async (req, res) => {
   await Notification.updateMany({ userId: req.ctx.user._id, readAt: null }, { $set: { readAt: new Date() } });
@@ -279,5 +288,16 @@ me.post('/notifications/read-all', h(async (req, res) => {
 }));
 me.post('/notifications/:id/read', validate({ params: idParams }), h(async (req, res) => {
   await Notification.updateOne({ _id: req.valid.params.id, userId: req.ctx.user._id }, { $set: { readAt: new Date() } });
+  res.status(204).end();
+}));
+me.delete('/notifications', h(async (req, res) => {
+  const filter = req.query.scope === 'all'
+    ? { userId: req.ctx.user._id }
+    : { userId: req.ctx.user._id, readAt: { $ne: null } };
+  await Notification.deleteMany(filter);
+  res.status(204).end();
+}));
+me.delete('/notifications/:id', validate({ params: idParams }), h(async (req, res) => {
+  await Notification.deleteOne({ _id: req.valid.params.id, userId: req.ctx.user._id });
   res.status(204).end();
 }));

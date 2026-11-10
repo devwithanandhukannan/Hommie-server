@@ -2,24 +2,29 @@ import webpush from 'web-push';
 import { config } from '../config.js';
 import { User, Notification, Membership } from '../models/index.js';
 import { renderNotification } from '../lib/notifI18n.js';
+import { publishToUsers } from './events.js';
 
 const pushEnabled = !!(config.vapid.publicKey && config.vapid.privateKey);
 if (pushEnabled) webpush.setVapidDetails(config.vapid.subject, config.vapid.publicKey, config.vapid.privateKey);
 export const isPushEnabled = () => pushEnabled;
 
 /**
- * Creates an in-app notification (idempotent through dedupeKey) and sends a Web Push,
- * localized per recipient based on their chosen `user.language`.
+ * Creates in-app notifications (idempotent through dedupeKey) and sends Web Push,
+ * batching user lookups and localizing per recipient based on `user.language`.
  */
 export async function notify({ userIds, familyId, type, title, body, url, dedupeKey, pushTitle, pushBody, i18nKey, params, coalesce = false }) {
   const unique = [...new Set((userIds || []).filter(Boolean).map(String))];
-  for (const userId of unique) {
-    const user = await User.findById(userId).select('push mutedFamilies language');
-    if (!user) continue;
-    if (familyId && (user.mutedFamilies || []).some((f) => String(f) === String(familyId)) && type === 'chat') continue;
+  if (!unique.length) return;
+
+  const users = await User.find({ _id: { $in: unique } }).select('push mutedFamilies language').lean();
+  const notifiedUserIds = [];
+
+  await Promise.all(users.map(async (user) => {
+    const userId = String(user._id);
+    if (familyId && (user.mutedFamilies || []).some((f) => String(f) === String(familyId)) && type === 'chat') return;
 
     const localized = renderNotification({ i18nKey, params, title, body, pushTitle, pushBody }, user.language || 'en');
-    if (!localized.title) continue;
+    if (!localized.title) return;
 
     try {
       const merged = coalesce && await Notification.findOneAndUpdate(
@@ -38,11 +43,13 @@ export async function notify({ userIds, familyId, type, title, body, url, dedupe
         });
       }
     } catch (e) {
-      if (e?.code === 11000) continue; // already notified
+      if (e?.code === 11000) return; // already notified
       throw e;
     }
 
-    if (!pushEnabled || !user.push?.length) continue;
+    notifiedUserIds.push(userId);
+    if (!pushEnabled || !user.push?.length) return;
+
     const payload = JSON.stringify({
       title: localized.pushTitle,
       body: localized.pushBody,
@@ -59,6 +66,10 @@ export async function notify({ userIds, familyId, type, title, body, url, dedupe
       }
     }));
     if (dead.length) await User.updateOne({ _id: userId }, { $pull: { push: { _id: { $in: dead } } } });
+  }));
+
+  if (notifiedUserIds.length) {
+    publishToUsers(notifiedUserIds, { kind: 'notification', type, familyId: familyId ? String(familyId) : null });
   }
 }
 

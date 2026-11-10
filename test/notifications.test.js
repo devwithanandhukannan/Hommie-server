@@ -41,6 +41,18 @@ function patchMethod(obj, key, replacement, restorers) {
   restorers.push(() => { obj[key] = orig; });
 }
 
+function mockUserFind(users, restorers, onFind) {
+  patchMethod(User, 'find', (filter) => {
+    onFind?.(filter);
+    const ids = (filter?._id?.$in || []).map(String);
+    return {
+      select: () => ({
+        lean: async () => ids.map((id) => users.get(id)).filter(Boolean),
+      }),
+    };
+  }, restorers);
+}
+
 test('renderNotification formats new event templates in en, ml, ta, and hi', () => {
   const en = renderNotification({
     i18nKey: 'grocery_added',
@@ -78,6 +90,15 @@ test('renderNotification formats new event templates in en, ml, ta, and hi', () 
   }, 'fr');
   assert.equal(fallback.title, 'Ravi gave you a task');
   assert.equal(fallback.body, 'Clean kitchen');
+
+  assert.equal(
+    renderNotification({ i18nKey: 'task_due_today', params: { title: 'Pay rent', dueDate: '2026-11-10' } }, 'ml').title,
+    'ഇന്ന് ചെയ്യേണ്ട ജോലി: Pay rent',
+  );
+  assert.equal(
+    renderNotification({ i18nKey: 'task_overdue', params: { title: 'Clean tank', dueDate: '2026-11-08' } }, 'ta').title,
+    'காலாவதியான பணி: Clean tank',
+  );
 });
 
 test('renderNotification medicine_added keeps lock-screen pushBody free of medicine name', () => {
@@ -117,10 +138,9 @@ test('notify stores localized Notification per recipient language and supports c
     ['u-hi', { _id: 'u-hi', language: 'hi', mutedFamilies: [], push: [] }],
   ]);
 
+  let userFindCalls = 0;
   try {
-    patchMethod(User, 'findById', (id) => ({
-      select: async () => users.get(String(id)) || null,
-    }), restorers);
+    mockUserFind(users, restorers, () => { userFindCalls++; });
     patchMethod(Notification, 'findOneAndUpdate', async (filter, update) => {
       if (filter.userId === 'u-en') {
         updated.push({ filter, update });
@@ -144,6 +164,7 @@ test('notify stores localized Notification per recipient language and supports c
       params: { by: 'Dhanya', name: 'Onions', qty: '1 kg' },
     });
 
+    assert.equal(userFindCalls, 1, 'notify batches all recipients into a single User.find query');
     assert.equal(updated.length, 1);
     assert.equal(updated[0].update.$set.title, 'Dhanya added to grocery list');
 
@@ -228,9 +249,7 @@ test('routes trigger localized notifications for grocery, medicine (privacy-safe
   };
 
   try {
-    patchMethod(User, 'findById', (id) => ({
-      select: async () => users.get(String(id)) || null,
-    }), restorers);
+    mockUserFind(users, restorers);
     patchMethod(Notification, 'findOneAndUpdate', async () => null, restorers);
     patchMethod(Notification, 'create', async (doc) => {
       notifications.push(doc);
@@ -356,9 +375,7 @@ test('POST /ai/apply sends localized grocery_batch, task_open, and task_assigned
   };
 
   try {
-    patchMethod(User, 'findById', (id) => ({
-      select: async () => users.get(String(id)) || null,
-    }), restorers);
+    mockUserFind(users, restorers);
     patchMethod(Notification, 'findOneAndUpdate', async () => null, restorers);
     patchMethod(Notification, 'create', async (doc) => {
       notifications.push(doc);
@@ -427,5 +444,25 @@ test('web translateNotificationText translates new notification strings', () => 
   assert.equal(
     translateNotificationText('Dhanya added to grocery list', 'en'),
     'Dhanya added to grocery list',
+  );
+  assert.equal(
+    translateNotificationText('Task due today: Pay gas', 'ml'),
+    'ഇന്ന് ചെയ്യേണ്ട ജോലി: Pay gas',
+  );
+  assert.equal(
+    translateNotificationText('Amma joined the family', 'hi'),
+    'Amma परिवार में शामिल हुए',
+  );
+  assert.equal(
+    translateNotificationText('Ravi completed: Mop floor', 'ta'),
+    'Ravi முடித்தார்: Mop floor',
+  );
+  assert.equal(
+    translateNotificationText('Milk bought by Dhanya (₹60)', 'ml'),
+    'Dhanya Milk വാങ്ങി (₹60)',
+  );
+  assert.equal(
+    translateNotificationText('Hommi AI added 3 items to Grocery (Supermarket)', 'ml'),
+    'Hommi AI 3 സാധനങ്ങൾ ലിസ്റ്റിൽ ചേർത്തു (Supermarket)',
   );
 });

@@ -9,6 +9,10 @@ import { h, forbidden } from './lib/errors.js';
 import { globalLimiter, csrfProtection } from './middleware/security.js';
 import { authenticate, familyContext } from './middleware/auth.js';
 import { errorHandler, notFoundHandler } from './middleware/error.js';
+import { compressJson } from './middleware/compress.js';
+import { oid } from './lib/validate.js';
+import { Membership } from './models/index.js';
+import { subscribeSse, publishFamilyChange } from './services/events.js';
 import { publicAuth, me } from './routes/auth.js';
 import { families } from './routes/families.js';
 import { tasks } from './routes/tasks.js';
@@ -49,9 +53,20 @@ export function createApp() {
 
   app.use(sanitize);
   app.use(csrfProtection);
+  app.use(compressJson);
 
   const api = express.Router();
   api.get('/health', (_req, res) => res.json({ ok: true, push: isPushEnabled(), vapidPublicKey: isPushEnabled() ? config.vapid.publicKey : null }));
+  api.get('/events', authenticate, h(async (req, res) => {
+    const raw = req.get('x-family-id');
+    if (raw) {
+      if (!oid.safeParse(raw).success) throw forbidden('Invalid family');
+      const ok = await Membership.exists({ familyId: raw, userId: req.ctx.user._id, status: 'active' });
+      if (!ok) throw forbidden('You are not a member of this family');
+      req.ctx.familyId = raw;
+    }
+    subscribeSse(req, res);
+  }));
   api.use('/auth', publicAuth);
   api.use('/me', me);
   api.use('/overview', authenticate, overview);
@@ -59,6 +74,17 @@ export function createApp() {
 
   const scoped = express.Router();
   scoped.use(authenticate, familyContext);
+  scoped.use((req, res, next) => {
+    if (!['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) return next();
+    if (req.path === '/chat/read' || (req.path.startsWith('/ai/') && req.path !== '/ai/apply')) return next();
+    res.on('finish', () => {
+      if (res.statusCode >= 200 && res.statusCode < 300) {
+        const kind = req.path.split('/')[1] || 'family';
+        publishFamilyChange(req.ctx.familyId, kind);
+      }
+    });
+    next();
+  });
   scoped.use('/dashboard', dashboard);
   scoped.use('/tasks', tasks);
   scoped.use('/grocery', grocery);

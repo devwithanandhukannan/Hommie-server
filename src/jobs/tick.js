@@ -31,8 +31,11 @@ export async function runTick(now = new Date()) {
 
         // 1. bills: reminder when the window opens, then once more when overdue
         const open = await BillInstance.find({ familyId: family._id, status: { $ne: 'paid' } }).limit(300);
+        const billsById = open.length
+          ? new Map((await Bill.find({ _id: { $in: open.map((i) => i.billId) } }).lean()).map((b) => [String(b._id), b]))
+          : new Map();
         for (const inst of open) {
-          const bill = await Bill.findById(inst.billId);
+          const bill = billsById.get(String(inst.billId));
           if (!bill) continue;
           const daysLeft = diffDays(inst.dueDate, today);
           if (daysLeft < 0 && !inst.overdueSentAt) {
@@ -53,14 +56,18 @@ export async function runTick(now = new Date()) {
         }
 
         // 2. medicine: remind the person and their caregivers at the dose time (5-minute window)
-        const meds = await Medicine.find({ familyId: family._id, active: true });
+        const [meds, loggedToday] = await Promise.all([
+          Medicine.find({ familyId: family._id, active: true }).lean(),
+          MedicineLog.find({ familyId: family._id, date: today }).select('medicineId time').lean(),
+        ]);
+        const loggedSet = new Set(loggedToday.map((l) => `${l.medicineId}:${l.time}`));
         for (const m of meds) {
           if (m.startDate > today || (m.endDate && m.endDate < today)) continue;
           if (m.days?.length && !m.days.includes(weekday(today))) continue;
           for (const t of m.times) {
             const late = minutes(time) - minutes(t);
             if (late < 0 || late > 30) continue; // 30-minute catch-up window after the dose time
-            if (await MedicineLog.exists({ medicineId: m._id, date: today, time: t })) continue;
+            if (loggedSet.has(`${m._id}:${t}`)) continue;
             await notify({
               userIds: [...uidOf(m.forId), ...(m.caregivers || []).flatMap(uidOf)], familyId: family._id, type: 'medicine', url: '/medicine',
               title: 'Medicine time', body: `${byId.get(String(m.forId))?.displayName || 'Someone'}: ${m.name} at ${t}`,
@@ -117,7 +124,22 @@ export async function runTick(now = new Date()) {
             }
           }
         }
-        void Task;
+        // 6. open non-bill tasks due today or overdue
+        for (const t of await Task.find({ familyId: family._id, status: 'open', kind: { $ne: 'bill' }, dueDate: { $ne: null, $lte: today } }).limit(200).lean()) {
+          const targetUids = t.assigneeId ? uidOf(t.assigneeId) : allUids;
+          if (!targetUids.length) continue;
+          const isToday = t.dueDate === today;
+          await notify({
+            userIds: targetUids,
+            familyId: family._id,
+            type: 'task',
+            url: '/tasks',
+            i18nKey: isToday ? 'task_due_today' : 'task_overdue',
+            params: { title: t.title, dueDate: t.dueDate },
+            dedupeKey: isToday ? `task:${t._id}:${today}:due` : `task:${t._id}:overdue`,
+          });
+          stats.notifications++;
+        }
       } catch (e) {
         console.error(`[tick] family ${family._id} failed:`, e.message);
       }

@@ -1,10 +1,10 @@
 import { Router } from 'express';
 import { h } from '../lib/errors.js';
-import { Task, BillInstance, Bill, Medicine, MedicineLog, SpecialDate, Document, GroceryItem, MealPlan, ChatMessage, Expense, Settlement, Loan, Membership, Family } from '../models/index.js';
+import { Task, BillInstance, Bill, Medicine, MedicineLog, SpecialDate, Document, GroceryItem, MealPlan, ChatMessage, Loan, Membership, Family } from '../models/index.js';
 import { taskDto, instanceDto, docDto, canViewDoc, canSeeMedicine, groceryDto, mealDto, loanDto } from '../dto.js';
 import { loadMembers, pick } from '../services/members.js';
 import { ensureInstances } from '../services/bills.js';
-import { computeBalances } from '../services/expenses.js';
+import { computeFamilyBalances } from '../services/expenses.js';
 import { dosesFor } from './medicine.js';
 import { nextOccurrence } from './life.js';
 import { todayIn, timeIn, diffDays } from '../lib/dates.js';
@@ -20,38 +20,44 @@ dashboard.get('/', h(async (req, res) => {
   await ensureInstances(family, today);
   const { map, docs } = await loadMembers(familyId);
 
-  const [myTasks, unclaimed, openInst, meds, specials, docsList, grocery, meals, expenses, settlements, loans] = await Promise.all([
-    Task.find({ familyId, status: 'open', assigneeId: me }).sort({ dueDate: 1 }).limit(20),
+  const recentCutoff = new Date(Date.now() - 48 * 3600_000);
+  const [myTasks, doneRecentTasks, unclaimed, openInst, meds, specials, docsList, grocery, meals, net, loans, unread] = await Promise.all([
+    Task.find({ familyId, status: 'open', assigneeId: me }).sort({ dueDate: 1 }).limit(20).lean(),
+    Task.find({ familyId, status: 'done', completedAt: { $gte: recentCutoff } }).sort({ completedAt: -1 }).limit(40).lean(),
     Task.countDocuments({ familyId, status: 'open', assigneeId: null }),
-    BillInstance.find({ familyId, status: { $ne: 'paid' } }).sort({ dueDate: 1 }).limit(30),
-    Medicine.find({ familyId, active: true }).limit(200),
-    SpecialDate.find({ familyId }).limit(300),
-    Document.find({ familyId, expiryDate: { $ne: null } }).limit(300),
-    GroceryItem.find({ familyId }).limit(500),
-    MealPlan.find({ familyId, date: today }),
-    Expense.find({ familyId }).limit(20000),
-    Settlement.find({ familyId }).limit(5000),
-    Loan.find({ familyId, ownerId: me, closedAt: null }),
+    BillInstance.find({ familyId, status: { $ne: 'paid' } }).sort({ dueDate: 1 }).limit(30).lean(),
+    Medicine.find({ familyId, active: true }).limit(200).lean(),
+    SpecialDate.find({ familyId }).limit(300).lean(),
+    Document.find({ familyId, expiryDate: { $ne: null } }).limit(300).lean(),
+    GroceryItem.find({ familyId }).limit(500).lean(),
+    MealPlan.find({ familyId, date: today }).lean(),
+    computeFamilyBalances(familyId),
+    Loan.find({ familyId, ownerId: me, closedAt: null }).lean(),
+    ChatMessage.countDocuments({ familyId, createdAt: { $gt: req.ctx.membership.lastChatReadAt }, senderId: { $ne: me } }),
   ]);
 
-  const billsById = new Map((await Bill.find({ _id: { $in: openInst.map((i) => i.billId) } })).map((b) => [String(b._id), b]));
-  const instTasks = new Map((await Task.find({ _id: { $in: openInst.map((i) => i.taskId).filter(Boolean) } })).map((t) => [String(t._id), t]));
+  const [billsList, instTasksList] = await Promise.all([
+    openInst.length ? Bill.find({ _id: { $in: openInst.map((i) => i.billId) } }).lean() : [],
+    openInst.some((i) => i.taskId) ? Task.find({ _id: { $in: openInst.map((i) => i.taskId).filter(Boolean) } }).lean() : [],
+  ]);
+  const billsById = new Map(billsList.map((b) => [String(b._id), b]));
+  const instTasks = new Map(instTasksList.map((t) => [String(t._id), t]));
   const instances = openInst.map((i) => instanceDto(i, billsById.get(String(i.billId)), map, today, instTasks.get(String(i.taskId))));
   const mineInst = (i) => String(instTasks.get(i.taskId)?.assigneeId ?? billsById.get(i.billId)?.payerId) === me;
 
   const visibleMeds = meds.filter((m) => canSeeMedicine(m, me));
-  const logs = await MedicineLog.find({ familyId, date: today, medicineId: { $in: visibleMeds.map((m) => m._id) } });
+  const logs = visibleMeds.length
+    ? await MedicineLog.find({ familyId, date: today, medicineId: { $in: visibleMeds.map((m) => m._id) } }).lean()
+    : [];
   const doses = dosesFor(visibleMeds, logs, today, timeIn(tz), today, map);
 
-  const net = computeBalances(expenses, settlements);
   const myNet = net.get(me) || 0;
-
-  const unread = await ChatMessage.countDocuments({ familyId, createdAt: { $gt: req.ctx.membership.lastChatReadAt }, senderId: { $ne: me } });
   const members = docs.length;
 
   res.json({
     date: today,
     myTasks: myTasks.map((t) => taskDto(t, map)),
+    doneTodayTasks: doneRecentTasks.map((t) => taskDto(t, map)),
     unclaimedTasks: unclaimed,
     billsNeedingAmount: instances.filter((i) => i.status === 'awaiting_amount' && (mineInst(i) || isAdmin(req))),
     upcomingBills: instances.filter((i) => i.daysLeft <= 14),

@@ -54,7 +54,7 @@ export const Session = mk('Session', {
   lastUsedAt: { type: Date, default: Date.now },
   expiresAt: { type: Date, required: true },
   revokedAt: { type: Date },
-});
+}, [[{ expiresAt: 1 }, { expireAfterSeconds: 0 }]]);
 
 export const Family = mk('Family', {
   name: { type: String, required: true, trim: true, maxlength: 60 },
@@ -122,7 +122,7 @@ export const GroceryItem = mk('GroceryItem', {
   unbilled: { type: Boolean, default: false },
   // URL string only (no image bytes/base64 saved in DB). null = unchecked, '' = checked miss, 'https://...' = valid URL.
   imageUrl: { type: String, maxlength: 500, default: null },
-}, [[{ familyId: 1, nameKey: 1 }, { unique: true }]]);
+}, [[{ familyId: 1, nameKey: 1 }, { unique: true }], [{ familyId: 1, status: 1 }, {}]]);
 
 export const Recipe = mk('Recipe', {
   familyId: { type: ObjectId, required: true, index: true },
@@ -212,7 +212,7 @@ export const Expense = mk('Expense', {
   source: { type: String, enum: ['manual', 'bill', 'grocery'], default: 'manual' },
   sourceId: { type: ObjectId },
   createdBy: { type: ObjectId },
-}, [[{ familyId: 1, date: 1 }, {}]]);
+}, [[{ familyId: 1, date: 1 }, {}], [{ familyId: 1, category: 1, date: 1 }, {}]]);
 
 export const Settlement = mk('Settlement', {
   familyId: { type: ObjectId, required: true, index: true },
@@ -270,7 +270,7 @@ export const Medicine = mk('Medicine', {
   notes: { type: String, maxlength: 300 },
   createdBy: { type: ObjectId },
   active: { type: Boolean, default: true },
-});
+}, [[{ familyId: 1, active: 1 }, {}]]);
 
 export const MedicineLog = mk('MedicineLog', {
   familyId: { type: ObjectId, required: true },
@@ -338,7 +338,12 @@ export const Notification = mk('Notification', {
   url: { type: String, maxlength: 200 },
   readAt: { type: Date },
   dedupeKey: { type: String, unique: true, sparse: true },
-}, [[{ userId: 1, _id: -1 }, {}]]);
+}, [
+  [{ userId: 1, _id: -1 }, {}],
+  [{ userId: 1, readAt: 1 }, {}],
+  [{ userId: 1, familyId: 1, type: 1, readAt: 1 }, {}],
+  [{ createdAt: 1 }, { expireAfterSeconds: 90 * 86400 }],
+]);
 
 export const AuditLog = mk('AuditLog', {
   familyId: { type: ObjectId, required: true },
