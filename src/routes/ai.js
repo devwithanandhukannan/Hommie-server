@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import multer from 'multer';
 import { z } from 'zod';
 import { h, badRequest, forbidden, notFound } from '../lib/errors.js';
 import { validate, oid, optText, ymd } from '../lib/validate.js';
@@ -7,8 +8,10 @@ import { isAdmin } from '../middleware/auth.js';
 import { canSeeMedicine } from '../dto.js';
 import { ensureInstances } from '../services/bills.js';
 import { decryptFile } from '../lib/crypto.js';
+import { scanObject } from '../lib/sanitize.js';
 import { aiLimiter } from '../middleware/security.js';
 import { attachImageToItem } from '../services/groceryImage.js';
+import { sniff } from './documents.js';
 import {
   Attachment,
   GroceryItem,
@@ -21,7 +24,6 @@ import {
   Medicine,
   MedicineLog,
   ChatMessage,
-  Membership,
   EXPENSE_CATEGORIES,
 } from '../models/index.js';
 import { analyzeWithGemini, agenticFamilyAssistant } from '../services/ai.js';
@@ -32,125 +34,210 @@ export const ai = Router();
 
 ai.use(aiLimiter);
 
+const aiAudioUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 4 * 1024 * 1024, files: 1, fields: 8, fieldSize: 32_768 },
+});
+
+const CONTEXT_TTL_MS = 20_000;
+const CONTEXT_MAX_ENTRIES = 200;
+const contextCache = new Map();
+
+/** Invalidates cached AI ground-truth context for a family after mutations. */
+export function invalidateAiContextCache(familyId) {
+  const prefix = `${String(familyId)}:`;
+  for (const k of contextCache.keys()) {
+    if (k.startsWith(prefix)) contextCache.delete(k);
+  }
+}
+
 /**
- * Builds live family ground-truth context for AI.
+ * Builds live family ground-truth context for AI using parallel DB queries,
+ * server-side expense aggregation, and a short per-(family, member) TTL cache.
  */
-async function buildFamilyContext(family, me) {
-  const familyId = family._id;
+export async function buildFamilyContext(family, me) {
+  const familyId = String(family._id);
+  const cacheKey = `${familyId}:${String(me)}`;
+  const cached = contextCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.value;
+  }
+
   const todayStr = todayIn(family.timezone);
   const tomorrowStr = addDays(todayStr, 1);
   const currentMonth = todayStr.slice(0, 7);
 
-  let familyMembers = [];
-  let memberDocs = [];
-  let memberMap = new Map();
-  let neededGroceries = [];
-  let inStockGroceries = [];
-  let openTasks = [];
-  let todayMedicines = [];
-  let monthlyExpenseTotal = 0;
-  let monthlyExpenseCategories = {};
-  let todayMeals = [];
+  const settled = await Promise.allSettled([
+    loadMembers(family._id),
+    GroceryItem.find({ familyId: family._id, status: 'needed' }).select('name qty category shop').limit(60).lean(),
+    GroceryItem.find({ familyId: family._id, status: 'stocked' }).select('name qty category shop').limit(60).lean(),
+    Task.find({ familyId: family._id, status: 'open', kind: { $ne: 'bill' } }).select('title dueDate kind assigneeId').limit(30).lean(),
+    Medicine.find({ familyId: family._id, active: true }).select('name dosage times forId createdBy caregivers startDate endDate days').lean(),
+    MedicineLog.find({ familyId: family._id, date: todayStr }).select('medicineId time status').lean(),
+    BillInstance.find({ familyId: family._id, status: { $ne: 'paid' }, dueDate: { $lte: addDays(todayStr, 14) } }).sort({ dueDate: 1 }).limit(10).lean(),
+    Expense.aggregate([
+      { $match: { familyId: family._id, date: { $gte: `${currentMonth}-01`, $lte: `${currentMonth}-31` } } },
+      { $group: { _id: { $ifNull: ['$category', 'other'] }, totalPaise: { $sum: '$amount' } } },
+    ]),
+    MealPlan.find({ familyId: family._id, date: { $in: [todayStr, tomorrowStr] } }).select('date slot items cookId').lean(),
+  ]);
+
+  const val = (i, fallback) => (settled[i].status === 'fulfilled' && settled[i].value ? settled[i].value : fallback);
+  const mem = val(0, { docs: [], map: new Map() });
+  const memberDocs = mem.docs || [];
+  const memberMap = mem.map || new Map();
+  const familyMembers = memberDocs.map((m) => ({
+    id: String(m._id),
+    name: m.displayName,
+    relation: m.relation,
+  }));
+
+  const neededGroceries = val(1, []);
+  const inStockGroceries = val(2, []);
+  const openTasks = val(3, []).map((t) => ({
+    ...t,
+    assigneeName: memberMap.get(String(t.assigneeId))?.displayName || null,
+  }));
+
+  const allMeds = val(4, []);
+  const medLogs = val(5, []);
+  const todayMedicines = [];
+  const weekday = new Date(`${todayStr}T00:00:00Z`).getUTCDay();
+  for (const med of allMeds.filter((m) => canSeeMedicine(m, me))) {
+    if (med.startDate > todayStr || (med.endDate && med.endDate < todayStr)) continue;
+    if (med.days?.length && !med.days.includes(weekday)) continue;
+    for (const time of med.times || []) {
+      const log = medLogs.find((l) => String(l.medicineId) === String(med._id) && l.time === time);
+      todayMedicines.push({
+        id: String(med._id),
+        name: med.name,
+        dosage: med.dosage,
+        time,
+        forName: memberMap.get(String(med.forId))?.displayName || 'Member',
+        status: log?.status || 'pending',
+      });
+    }
+  }
+
+  const insts = val(6, []);
   let upcomingBills = [];
+  if (insts.length > 0) {
+    try {
+      const bills = new Map((await Bill.find({ _id: { $in: insts.map((i) => i.billId) } }).select('title').lean()).map((b) => [String(b._id), b.title]));
+      upcomingBills = insts.map((i) => ({
+        title: bills.get(String(i.billId)) || 'Bill',
+        dueDate: i.dueDate,
+        amount: i.amount == null ? null : Math.round(i.amount / 100),
+      }));
+    } catch {}
+  }
 
-  try {
-    const mem = await loadMembers(familyId);
-    memberDocs = mem.docs || [];
-    memberMap = mem.map || new Map();
-    familyMembers = memberDocs.map((m) => ({
-      id: String(m._id),
-      name: m.displayName,
-      relation: m.relation,
-    }));
-  } catch {}
+  let monthlyExpenseTotalPaise = 0;
+  const monthlyExpenseCategories = {};
+  for (const row of val(7, [])) {
+    monthlyExpenseTotalPaise += row.totalPaise || 0;
+    const cat = row._id || 'other';
+    monthlyExpenseCategories[cat] = Math.round((row.totalPaise || 0) / 100);
+  }
+  const monthlyExpenseTotal = Math.round(monthlyExpenseTotalPaise / 100);
 
-  try {
-    [neededGroceries, inStockGroceries] = await Promise.all([
-      GroceryItem.find({ familyId, status: 'needed' }).select('name qty category shop').limit(60).lean(),
-      GroceryItem.find({ familyId, status: 'stocked' }).select('name qty category shop').limit(60).lean(),
-    ]);
-  } catch {}
+  const todayMeals = val(8, []).map((m) => ({
+    date: m.date,
+    slot: m.slot,
+    items: m.items || [],
+    cookName: memberMap.get(String(m.cookId))?.displayName || null,
+  }));
 
-  try {
-    const rows = await Task.find({ familyId, status: 'open', kind: { $ne: 'bill' } })
-      .select('title dueDate kind assigneeId')
-      .limit(30)
-      .lean();
-    openTasks = rows.map((t) => ({ ...t, assigneeName: memberMap.get(String(t.assigneeId))?.displayName || null }));
-  } catch {}
-
-  try {
-    // Medicine is private to the patient, their caregivers and whoever added it: the AI must obey the same rule.
-    const [allMeds, medLogs] = await Promise.all([
-      Medicine.find({ familyId, active: true }).select('name dosage times forId createdBy caregivers startDate endDate days').lean(),
-      MedicineLog.find({ familyId, date: todayStr }).select('medicineId time status').lean(),
-    ]);
-    const weekday = new Date(`${todayStr}T00:00:00Z`).getUTCDay();
-    for (const med of allMeds.filter((m) => canSeeMedicine(m, me))) {
-      if (med.startDate > todayStr || (med.endDate && med.endDate < todayStr)) continue;
-      if (med.days?.length && !med.days.includes(weekday)) continue;
-      for (const time of med.times || []) {
-        const log = medLogs.find((l) => String(l.medicineId) === String(med._id) && l.time === time);
-        todayMedicines.push({ id: String(med._id), name: med.name, dosage: med.dosage, time, forName: memberMap.get(String(med.forId))?.displayName || 'Member', status: log?.status || 'pending' });
-      }
-    }
-  } catch {}
-
-  try {
-    const insts = await BillInstance.find({ familyId, status: { $ne: 'paid' }, dueDate: { $lte: addDays(todayStr, 14) } }).sort({ dueDate: 1 }).limit(10).lean();
-    const bills = new Map((await Bill.find({ _id: { $in: insts.map((i) => i.billId) } }).select('title').lean()).map((b) => [String(b._id), b.title]));
-    upcomingBills = insts.map((i) => ({ title: bills.get(String(i.billId)) || 'Bill', dueDate: i.dueDate, amount: i.amount == null ? null : Math.round(i.amount / 100) }));
-  } catch {}
-
-  try {
-    const expenses = await Expense.find({
-      familyId,
-      date: { $gte: `${currentMonth}-01`, $lte: `${currentMonth}-31` },
-    }).select('amount category note date').lean();
-
-    let monthlyExpenseTotalPaise = 0;
-    for (const exp of expenses || []) {
-      monthlyExpenseTotalPaise += exp.amount || 0;
-      const cat = exp.category || 'other';
-      monthlyExpenseCategories[cat] = (monthlyExpenseCategories[cat] || 0) + Math.round((exp.amount || 0) / 100);
-    }
-    monthlyExpenseTotal = Math.round(monthlyExpenseTotalPaise / 100);
-  } catch {}
-
-  try {
-    todayMeals = await MealPlan.find({ familyId, date: { $in: [todayStr, tomorrowStr] } })
-      .select('date slot items cookId')
-      .lean();
-  } catch {}
-
-  return {
+  const ctx = {
     todayStr,
     tomorrowStr,
     familyMembers,
     memberDocs,
     memberMap,
-    neededGroceries: neededGroceries || [],
-    inStockGroceries: inStockGroceries || [],
-    openTasks: openTasks || [],
-    todayMedicines: todayMedicines || [],
+    neededGroceries,
+    inStockGroceries,
+    openTasks,
+    todayMedicines,
     monthlyExpenseTotal,
     monthlyExpenseCategories,
-    todayMeals: todayMeals || [],
-    upcomingBills: upcomingBills || [],
+    todayMeals,
+    upcomingBills,
   };
+
+  if (contextCache.size >= CONTEXT_MAX_ENTRIES) {
+    const oldest = contextCache.keys().next().value;
+    if (oldest) contextCache.delete(oldest);
+  }
+  contextCache.set(cacheKey, { value: ctx, expiresAt: Date.now() + CONTEXT_TTL_MS });
+  return ctx;
+}
+
+function parseAiMultipart(req, res, next) {
+  if (!req.is('multipart/form-data')) return next();
+  aiAudioUpload.single('file')(req, res, (err) => {
+    if (err) return next(err);
+    try {
+      req.body = req.body ? { ...req.body } : {};
+      if (typeof req.body.history === 'string') {
+        req.body.history = JSON.parse(req.body.history);
+      }
+      scanObject(req.body);
+      next();
+    } catch (e) {
+      next(e instanceof SyntaxError ? badRequest('Invalid history JSON') : e);
+    }
+  });
+}
+
+async function resolveAudioInput(req, attachmentId) {
+  if (req.file) {
+    if (!req.file.buffer?.length) throw badRequest('Audio recording is empty');
+    const detected = sniff(req.file.buffer);
+    if (!detected || !detected.startsWith('audio/')) {
+      throw badRequest('Uploaded file must be a supported audio recording');
+    }
+    return { audioBuffer: req.file.buffer, mimeType: detected };
+  }
+
+  if (attachmentId) {
+    const a = await Attachment.findOne({
+      _id: attachmentId,
+      familyId: req.ctx.familyId,
+    }).select('+data +enc');
+
+    if (!a) throw notFound('Audio attachment not found');
+    if (!a.mime?.startsWith('audio/')) throw badRequest('Attachment must be an audio file');
+
+    try {
+      return { audioBuffer: decryptFile(a.data, a.enc), mimeType: a.mime };
+    } catch {
+      throw new Error('Could not decrypt audio attachment');
+    }
+  }
+
+  return { audioBuffer: null, mimeType: 'audio/webm' };
 }
 
 /**
  * Agentic Household Assistant with full live family context.
- * Handles multi-intent compound queries, shop-based groceries, recipes, meals, and calendar tags.
+ * Accepts either JSON ({ message, attachmentId, history, speechLang }) or
+ * multipart/form-data (audio `file` processed in RAM with zero DB storage overhead).
  */
 ai.post(
   '/agent',
+  parseAiMultipart,
+  h(async (req, res, next) => {
+    if (!req.file && (!req.body?.message || !String(req.body.message).trim()) && !req.body?.attachmentId) {
+      throw badRequest('Either message, audio file, or attachmentId is required');
+    }
+    next();
+  }),
   validate({
     body: z
       .object({
         message: z.string().max(2000).optional(),
         attachmentId: oid.optional(),
+        speechLang: z.string().max(16).optional(),
         history: z
           .array(
             z.object({
@@ -161,34 +248,11 @@ ai.post(
           .max(20)
           .optional(),
       })
-      .strict()
-      .refine((b) => (b.message && b.message.trim().length > 0) || b.attachmentId, {
-        message: 'Either message or attachmentId is required',
-      }),
+      .strict(),
   }),
   h(async (req, res) => {
-    const { message, attachmentId, history } = req.valid.body;
-    const familyId = req.ctx.familyId;
-
-    let audioBuffer = null;
-    let mimeType = 'audio/webm';
-
-    if (attachmentId) {
-      const a = await Attachment.findOne({
-        _id: attachmentId,
-        familyId,
-      }).select('+data +enc');
-
-      if (!a) throw notFound('Audio attachment not found');
-      if (!a.mime?.startsWith('audio/')) throw badRequest('Attachment must be an audio file');
-
-      try {
-        audioBuffer = decryptFile(a.data, a.enc);
-      } catch {
-        throw new Error('Could not decrypt audio attachment');
-      }
-      mimeType = a.mime;
-    }
+    const { message, attachmentId, history, speechLang } = req.valid.body;
+    const { audioBuffer, mimeType } = await resolveAudioInput(req, attachmentId);
 
     const context = await buildFamilyContext(req.ctx.family, req.ctx.me);
     context.uiLang = req.ctx.user?.language || 'en';
@@ -197,6 +261,7 @@ ai.post(
       message: message || '',
       audioBuffer,
       mimeType,
+      speechLang: speechLang || '',
       context,
       history: history || [],
     });
@@ -206,47 +271,33 @@ ai.post(
 );
 
 /**
- * Analyzes a text message or audio attachment using Gemini AI with live context.
+ * Analyzes a text message, direct audio upload, or legacy audio attachment using Gemini AI.
  */
 ai.post(
   '/analyze',
+  parseAiMultipart,
+  h(async (req, res, next) => {
+    if (!req.file && (!req.body?.text || !String(req.body.text).trim()) && !req.body?.attachmentId) {
+      throw badRequest('Either text, audio file, or attachmentId is required');
+    }
+    next();
+  }),
   validate({
     body: z
       .object({
         text: optText(2000),
         attachmentId: oid.optional(),
+        speechLang: z.string().max(16).optional(),
       })
-      .strict()
-      .refine((b) => (b.text && b.text.trim().length > 0) || b.attachmentId, {
-        message: 'Either text or attachmentId is required',
-      }),
+      .strict(),
   }),
   h(async (req, res) => {
-    const { text, attachmentId } = req.valid.body;
-    const familyId = req.ctx.familyId;
-    let audioBuffer = null;
-    let mimeType = 'audio/webm';
-
-    if (attachmentId) {
-      const a = await Attachment.findOne({
-        _id: attachmentId,
-        familyId,
-      }).select('+data +enc');
-
-      if (!a) throw notFound('Audio attachment not found');
-      if (!a.mime?.startsWith('audio/')) throw badRequest('Attachment must be an audio file');
-
-      try {
-        audioBuffer = decryptFile(a.data, a.enc);
-      } catch {
-        throw new Error('Could not decrypt audio attachment');
-      }
-      mimeType = a.mime;
-    }
+    const { text, attachmentId, speechLang } = req.valid.body;
+    const { audioBuffer, mimeType } = await resolveAudioInput(req, attachmentId);
 
     const context = await buildFamilyContext(req.ctx.family, req.ctx.me);
     context.uiLang = req.ctx.user?.language || 'en';
-    const result = await analyzeWithGemini({ text, audioBuffer, mimeType, context });
+    const result = await analyzeWithGemini({ text, audioBuffer, mimeType, speechLang: speechLang || '', context });
     res.json(result);
   })
 );
@@ -535,6 +586,8 @@ ai.post(
         // ignore notification error
       }
     }
+
+    invalidateAiContextCache(familyId);
 
     res.status(201).json({
       success: true,
