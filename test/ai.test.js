@@ -171,3 +171,45 @@ test('agenticFamilyAssistant returns localized error fallback without retrying o
   }
 });
 
+test('Manglish phrases and audio prompt rules select Malayalam over English/Tamil', async () => {
+  const captured = [];
+  const restore = withMockedGemini(async (_url, opts) => {
+    const body = JSON.parse(opts.body);
+    captured.push(body);
+    return new Response(
+      JSON.stringify({
+        candidates: [
+          {
+            content: {
+              parts: [
+                {
+                  text: JSON.stringify({
+                    transcription: 'നാളെ മോർണിംഗ് ബ്രേക്ക്ഫാസ്റ്റ് പുട്ടാണേ',
+                    reply: 'നാളെ രാവിലെ പുട്ട് തയ്യാറാക്കാം.',
+                    actions: [],
+                    suggestedChips: [],
+                  }),
+                },
+              ],
+            },
+          },
+        ],
+      }),
+      { status: 200 }
+    );
+  });
+
+  try {
+    await agenticFamilyAssistant({ message: 'Naale morning breakfast puttaane', context: { uiLang: 'en' } });
+    await agenticFamilyAssistant({ message: 'paal venam', context: { uiLang: 'en' } });
+    await agenticFamilyAssistant({ message: 'How to make biryani', context: { uiLang: 'en' } });
+
+    assert.match(captured[0].systemInstruction.parts[0].text, /Malayalam \/ Manglish vs Tamil disambiguation/);
+    assert.match(captured[0].contents[0].parts[0].text, /LANGUAGE: Respond strictly in Malayalam\./);
+    assert.match(captured[1].contents[0].parts[0].text, /LANGUAGE: Respond strictly in Malayalam\./);
+    assert.match(captured[2].contents[0].parts[0].text, /LANGUAGE: Respond strictly in English/);
+  } finally {
+    restore();
+  }
+});
+

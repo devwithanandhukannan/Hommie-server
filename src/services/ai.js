@@ -75,7 +75,8 @@ LANGUAGE RULE (CRITICAL):
 - READABLE FORMATTING: Always use real newline breaks (\n) in "reply" — NEVER pack headings, bullets, and numbered steps onto one line. Format recipes with a brief intro line, a blank line, "Ingredients:\n- Item: qty (Already available in your kitchen)\n- Item: qty (need to buy)", a blank line, and "Steps:\n1. Step description (10 min)\n2. ..." (or local-language equivalent headings).
 
 AUDIO / SPEECH RULES:
-- Transcribe spoken voice accurately, including Malayalam, Indian English, and mixed Malayalam-English household terms (e.g. dish names, medicine names, groceries).
+- Transcribe spoken voice accurately, including Malayalam, Indian English, and mixed Malayalam-English (Manglish) household terms (e.g. dish names, medicine names, groceries).
+- Malayalam / Manglish vs Tamil disambiguation (CRITICAL): When short audio mixes English words ("morning", "breakfast", "dinner") with shared South-Indian words like "naale" or "puttu", check Malayalam endings/particles ("-aanu", "-aane", "-undo", "-illa", "-venam", "-cheyyam", "-alle") vs Tamil ("-irukku", "-illai", "-thaan", "naalaikku"). For example, "naale morning breakfast puttaane" (ending in "-aane") is Malayalam/Manglish -> transcribe in Malayalam ("നാളെ മോർണിംഗ് ബ്രേക്ക്ഫാസ്റ്റ് പുട്ടാണേ"), NOT Tamil.
 - If audio is silent, noise-only, or unintelligible, return transcription: "", actions: [], and politely ask the user to speak clearly.
 
 HOUSEHOLD RULES:
@@ -202,7 +203,8 @@ export function formatContext(context = {}) {
 - Month Expenses: ₹${context.monthlyExpenseTotal || 0} (${expensesBreakdown})`;
 }
 
-const MANGLISH_RE = /\b(entha|enthu|enthokke|engane|undakkam|cheyyam|evide|enna|aano|alle|vendath|vaangan|chilavu|veetil|chaya|kanji|choru|curry|ari|meen|irachi|pachakkari|innathe|naale|innale|ningal|njan|njammale)\b/i;
+const MANGLISH_RE = /\b(entha|enthu|enthokke|engane|undakkam|cheyyam|cheythu|evide|enna|aano|aanu|aane|alle|venam|veeno|vendath|undo|illa|ille|kittum|vaangam|vaangikko|medikkam|medikkanam|vekkam|vekkanam|chilavu|veetil|chaya|kanji|choru|curry|ari|meen|irachi|pachakkari|puttu|appam|dosa|idli|porotta|paal|mutta|thenga|savala|thakkali|innu|innathe|naale|innale|ningal|njan|njammale)\b/i;
+const MANGLISH_SUFFIX_RE = /\b[a-z]+(?:aane|aanu|ikkanam|akkanam|ukayanu|undallo)\b/i;
 
 function detectMessageLang(msg, fallback = 'en') {
   const s = String(msg || '').trim();
@@ -210,7 +212,7 @@ function detectMessageLang(msg, fallback = 'en') {
   if (/[\u0D00-\u0D7F]/.test(s)) return 'ml';
   if (/[\u0B80-\u0BFF]/.test(s)) return 'ta';
   if (/[\u0900-\u097F]/.test(s)) return 'hi';
-  if (MANGLISH_RE.test(s)) return 'ml';
+  if (MANGLISH_RE.test(s) || MANGLISH_SUFFIX_RE.test(s)) return 'ml';
   return 'en';
 }
 
