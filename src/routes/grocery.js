@@ -8,6 +8,7 @@ import { loadMembers } from '../services/members.js';
 import { createExpense, equalSplit } from '../services/expenses.js';
 import { systemMessage } from '../services/chat.js';
 import { todayIn } from '../lib/dates.js';
+import { attachImageToItem, backfillMissingGroceryImages } from '../services/groceryImage.js';
 
 export const grocery = Router();
 
@@ -35,7 +36,7 @@ async function recordGroceryExpense(req, g, price, date) {
 }
 const keyOf = (n) => n.trim().toLowerCase().replace(/\s+/g, ' ');
 
-export async function addNeeded(familyId, name, addedBy, qty, category, shop) {
+export async function addNeeded(familyId, name, addedBy, qty, category, shop, { awaitMs = 0 } = {}) {
   const nameKey = keyOf(name);
   const existing = await GroceryItem.findOne({ familyId, nameKey });
   if (existing) {
@@ -44,25 +45,26 @@ export async function addNeeded(familyId, name, addedBy, qty, category, shop) {
     if (category) existing.category = String(category).slice(0, 50);
     if (shop) existing.shop = String(shop).slice(0, 60);
     await existing.save();
+    if (existing.imageUrl == null) await attachImageToItem(existing, { awaitMs });
     return { item: existing, created: false };
   }
-  return {
-    item: await GroceryItem.create({
-      familyId,
-      name: name.trim().slice(0, 140),
-      nameKey,
-      qty: (qty || '').slice(0, 60),
-      category: (category || 'other').slice(0, 50),
-      shop: (shop || 'Supermarket').slice(0, 60),
-      status: 'needed',
-      addedBy,
-    }),
-    created: true,
-  };
+  const item = await GroceryItem.create({
+    familyId,
+    name: name.trim().slice(0, 140),
+    nameKey,
+    qty: (qty || '').slice(0, 60),
+    category: (category || 'other').slice(0, 50),
+    shop: (shop || 'Supermarket').slice(0, 60),
+    status: 'needed',
+    addedBy,
+  });
+  await attachImageToItem(item, { awaitMs });
+  return { item, created: true };
 }
 
 grocery.get('/', h(async (req, res) => {
   const list = await GroceryItem.find({ familyId: req.ctx.familyId }).limit(500);
+  await backfillMissingGroceryImages(list);
   const { map } = await loadMembers(req.ctx.familyId);
   const items = list.map((g) => groceryDto(g, map));
   items.sort((a, b) => (a.status === b.status ? a.name.localeCompare(b.name) : a.status === 'needed' ? -1 : 1));
@@ -70,7 +72,7 @@ grocery.get('/', h(async (req, res) => {
 }));
 
 grocery.post('/', validate({ body: z.object({ name: text(80), qty: optText(30) }).strict() }), h(async (req, res) => {
-  const { item, created } = await addNeeded(req.ctx.familyId, req.valid.body.name, req.ctx.me, req.valid.body.qty);
+  const { item, created } = await addNeeded(req.ctx.familyId, req.valid.body.name, req.ctx.me, req.valid.body.qty, undefined, undefined, { awaitMs: 1600 });
   const { map } = await loadMembers(req.ctx.familyId);
   res.status(created ? 201 : 200).json(groceryDto(item, map));
 }));
@@ -78,9 +80,13 @@ grocery.post('/', validate({ body: z.object({ name: text(80), qty: optText(30) }
 grocery.patch('/:id', validate({ params: idParams, body: z.object({ name: text(80).optional(), qty: optText(30) }).strict() }), h(async (req, res) => {
   const g = await GroceryItem.findOne({ _id: req.valid.params.id, familyId: req.ctx.familyId });
   if (!g) throw notFound();
+  const prevKey = g.nameKey;
   if (req.valid.body.name) { g.name = req.valid.body.name; g.nameKey = keyOf(req.valid.body.name); }
   if (req.valid.body.qty !== undefined) g.qty = req.valid.body.qty;
+  const renamed = Boolean(req.valid.body.name && g.nameKey !== prevKey);
+  if (renamed) g.imageUrl = null;
   await g.save();
+  if (renamed) await attachImageToItem(g, { awaitMs: 1400 });
   const { map } = await loadMembers(req.ctx.familyId);
   res.json(groceryDto(g, map));
 }));

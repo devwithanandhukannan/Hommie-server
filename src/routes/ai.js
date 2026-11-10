@@ -8,6 +8,7 @@ import { canSeeMedicine } from '../dto.js';
 import { ensureInstances } from '../services/bills.js';
 import { decryptFile } from '../lib/crypto.js';
 import { aiLimiter } from '../middleware/security.js';
+import { attachImageToItem } from '../services/groceryImage.js';
 import {
   Attachment,
   GroceryItem,
@@ -370,6 +371,7 @@ ai.post(
             addedBy: me,
           });
         }
+        if (item.imageUrl == null) attachImageToItem(item);
         addedGroceryCount++;
         shopsInvolved.add(safeShop);
         added.push({ type: 'grocery', id: String(item._id), title: safeTitle, shop: safeShop });

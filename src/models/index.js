@@ -119,6 +119,8 @@ export const GroceryItem = mk('GroceryItem', {
   lastBoughtAt: { type: Date },
   lastPrice: { type: Number },
   buyDates: [{ type: Date }],
+  // URL string only (no image bytes/base64 saved in DB). null = unchecked, '' = checked miss, 'https://...' = valid URL.
+  imageUrl: { type: String, maxlength: 500, default: null },
 }, [[{ familyId: 1, nameKey: 1 }, { unique: true }]]);
 
 export const Recipe = mk('Recipe', {
@@ -355,9 +357,16 @@ export const EmailOtp = mk('EmailOtp', {
   attempts: { type: Number, default: 0 },
 }, [[{ expiresAt: 1 }, { expireAfterSeconds: 0 }]]);
 
+// Shared URL-only cache so external image APIs are queried at most once per unique grocery name.
+export const GroceryImageCache = mk('GroceryImageCache', {
+  nameKey: { type: String, required: true, unique: true, maxlength: 140 },
+  imageUrl: { type: String, maxlength: 500, default: '' },
+  resolvedAt: { type: Date, default: Date.now },
+});
+
 export const FAMILY_SCOPED = [Task, GroceryItem, Recipe, MealPlan, Bill, BillInstance, Loan, LoanPayment, Expense, Settlement,
   Document, DocumentAccessLog, Attachment, Medicine, MedicineLog, SpecialDate, Guest, Contact, ChatMessage, AuditLog, Invite, Membership];
 
 export const allModels = { User, Session, Family, Membership, Invite, Task, GroceryItem, Recipe, MealPlan, Bill, BillInstance, Loan,
   LoanPayment, Expense, Settlement, Document, DocumentAccessLog, Attachment, Medicine, MedicineLog, SpecialDate, Guest, Contact,
-  ChatMessage, Notification, AuditLog, EmailOtp };
+  ChatMessage, Notification, AuditLog, EmailOtp, GroceryImageCache };
