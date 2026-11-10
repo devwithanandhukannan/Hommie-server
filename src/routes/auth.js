@@ -50,7 +50,7 @@ publicAuth.post('/register/send-otp', authLimiter, validate({ body: z.object({ n
   const otpHash = sha256(otp);
 
   await EmailOtp.deleteMany({ email: mail, type: 'register' });
-  await EmailOtp.create({
+  const otpRecord = await EmailOtp.create({
     email: mail,
     otpHash,
     type: 'register',
@@ -61,6 +61,7 @@ publicAuth.post('/register/send-otp', authLimiter, validate({ body: z.object({ n
   try {
     await sendOtpEmail(mail, otp, name);
   } catch (err) {
+    await EmailOtp.deleteOne({ _id: otpRecord._id }).catch(() => {});
     console.error('[auth] Failed to send registration OTP email:', err);
     throw badRequest('Failed to send verification email. Please check your email address and try again.');
   }
