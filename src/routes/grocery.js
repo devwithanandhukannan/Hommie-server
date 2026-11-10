@@ -23,8 +23,9 @@ async function recordGroceryExpense(req, g, price, date) {
     familyId: req.ctx.familyId, source: 'grocery', sourceId: g._id, createdAt: { $gt: new Date(Date.now() - 864e5) },
   }).sort({ _id: -1 });
   if (recent) {
-    recent.amount = price; recent.split = split; recent.paidById = req.ctx.me;
+    recent.amount = price; recent.split = split; recent.paidById = req.ctx.me; recent.note = g.name;
     if (date) recent.date = date;
+    recent.markModified('split');
     await recent.save();
     return { expense: recent, created: false };
   }

@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { h, badRequest, forbidden, notFound } from '../lib/errors.js';
 import { validate, idParams, oid, ymd, ym, money, optText } from '../lib/validate.js';
-import { Expense, Settlement, Membership, Bill } from '../models/index.js';
+import { Expense, Settlement, Membership, Bill, GroceryItem } from '../models/index.js';
 import { EXPENSE_CATEGORIES } from '../models/index.js';
 import { expenseDto, settlementDto, billDto } from '../dto.js';
 import { loadMembers, pick } from '../services/members.js';
@@ -74,6 +74,9 @@ expenses.patch('/:id', validate({
     e.markModified('split');
   }
   await e.save();
+  if (e.source === 'grocery' && e.sourceId && b.amount !== undefined) {
+    await GroceryItem.updateOne({ _id: e.sourceId, familyId: req.ctx.familyId }, { $set: { lastPrice: b.amount } });
+  }
   const { map } = await loadMembers(req.ctx.familyId);
   res.json(expenseDto(e, map));
 }));
