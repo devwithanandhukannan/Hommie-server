@@ -80,6 +80,9 @@ test('agenticFamilyAssistant sends structured schema, systemInstruction, minimal
     assert.match(capturedUrl, /gemini-3\.5-flash-lite:generateContent/);
     assert.ok(capturedBody.systemInstruction?.parts?.[0]?.text?.includes('Hommi AI'));
     assert.match(capturedBody.systemInstruction.parts[0].text, /actions\[\]\.title/);
+    assert.match(capturedBody.systemInstruction.parts[0].text, /FULL KITCHEN DETAIL/);
+    assert.match(capturedBody.systemInstruction.parts[0].text, /What can I cook fast/);
+    assert.equal(capturedBody.generationConfig.maxOutputTokens, 4096);
     assert.equal(capturedBody.generationConfig.responseMimeType, 'application/json');
     assert.equal(capturedBody.generationConfig.responseSchema.type, 'OBJECT');
     assert.equal(capturedBody.generationConfig.thinkingConfig.thinkingLevel, 'MINIMAL');

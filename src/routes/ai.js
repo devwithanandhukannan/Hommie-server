@@ -70,7 +70,7 @@ export async function buildFamilyContext(family, me) {
   const settled = await Promise.allSettled([
     loadMembers(family._id),
     GroceryItem.find({ familyId: family._id, status: 'needed' }).select('name qty category shop').limit(60).lean(),
-    GroceryItem.find({ familyId: family._id, status: 'stocked' }).select('name qty category shop').limit(60).lean(),
+    GroceryItem.find({ familyId: family._id, status: 'stocked' }).select('name qty category shop').limit(100).lean(),
     Task.find({ familyId: family._id, status: 'open', kind: { $ne: 'bill' } }).select('title dueDate kind assigneeId').limit(30).lean(),
     Medicine.find({ familyId: family._id, active: true }).select('name dosage times forId createdBy caregivers startDate endDate days').lean(),
     MedicineLog.find({ familyId: family._id, date: todayStr }).select('medicineId time status').lean(),

@@ -80,15 +80,23 @@ AUDIO / SPEECH RULES:
 - If audio is silent, noise-only, or unintelligible, return transcription: "", actions: [], and politely ask the user to speak clearly.
 
 HOUSEHOLD RULES:
-1. Cooking / Dish queries:
-   - Include clear ingredients (cross-checked against Kitchen Inventory) and numbered steps with realistic cooking durations.
+1. Cooking / Dish & Meal queries (FULL KITCHEN DETAIL — DO NOT COMPRESS):
+   - NEVER limit or simplify recipes to 5 short/vague steps. Include as many clear, detailed numbered steps as the dish genuinely needs (all prep, marination, tempering/tadka, heat transitions, water ratios, whistles/simmer times, resting, and serving).
+   - List EVERY ingredient with exact household measurements (including oil/ghee, spices like turmeric/chilli/coriander/garam masala, salt, water ratio, aromatics, curry leaves, garnish — not just main items) and cross-check against Kitchen Inventory.
+   - Each step MUST give practical precision: exact ingredient amounts added at that stage, flame level (low / medium / high), timings in parentheses e.g. (10 min), and clear doneness cues (e.g. "until onions turn deep golden and oil separates").
+   - Put the SAME complete detailed ingredients and full step-by-step instructions into the "add_recipe" action's "ingredients" and "steps" arrays so nothing is lost when saved.
    - Only add missing ingredients (not already in Kitchen Inventory) as "add_grocery" actions with short titles (<60 chars), quantity, category (vegetables|meat|spices|dairy|pantry|household|medical|other), and shop (Vegetable Stall | Meat & Poultry Stall | Supermarket / Grocery | Dairy & Bakery | Medical Store — or local-language equivalent).
-   - Add "add_recipe" (title, ingredients, steps), and when asked to schedule, add "add_meal" (date YYYY-MM-DD, slot "morning"|"noon"|"night", cookName from Family Members) and "add_calendar_event" (dueDate, assigneeName).
-2. Ground-truth queries:
+   - Add "add_meal" (date YYYY-MM-DD, slot "morning"|"noon"|"night", cookName from Family Members) and "add_calendar_event" (dueDate, assigneeName) when scheduling or planning a meal.
+2. "What can I cook fast / from my kitchen?" queries (Kitchen-stock meal ideas):
+   - Inspect "Kitchen Stock" strictly! Never claim an item is in the kitchen unless it appears in Kitchen Stock (basic water/salt/oil may be noted as basic staples).
+   - Rank 2-4 realistic quick meals sorted by speed & readiness: first dishes you can cook RIGHT NOW using only Kitchen Stock (0 items to buy, with estimated prep+cook time e.g. "~15 min"), then optional "needs 1-2 extra items" ideas.
+   - If the user asks for one quick meal right now or picks one, also provide full detailed "Ingredients:" and kitchen-ready "Steps:", plus "add_recipe" (and "add_meal" / missing "add_grocery" if relevant). If they are only brainstorming options, return "actions": [] and put the top 2-3 dishes directly into "suggestedChips" (e.g. "Make Egg Roast (full recipe)", "Plan Puttu for dinner") so they can tap any option.
+   - If Kitchen Stock is empty ("None"), clearly state the kitchen stock list is empty and suggest quick ideas they might make with basic pantry items or ask what ingredients they have on hand.
+3. Ground-truth queries:
    - Groceries to buy, kitchen stock, meals today/tomorrow, open tasks, today's medicines, upcoming bills, or monthly expense totals: answer strictly from LIVE HOUSEHOLD GROUND-TRUTH. Never invent items or numbers.
    - For "delete_task", set targetId to the exact open task ID.
    - For "add_expense", amount must be a pure number in INR (not string).
-3. Keep "suggestedChips" to 2-3 short, useful follow-up prompts in the active language.`;
+4. Keep "suggestedChips" to 2-3 short, useful follow-up prompts in the active language.`;
 
 function thinkingConfigForModel(model) {
   const m = String(model || '').toLowerCase();
@@ -112,7 +120,7 @@ async function callGemini(payload) {
     ...payload,
     generationConfig: {
       temperature: 0.2,
-      maxOutputTokens: 2048,
+      maxOutputTokens: 4096,
       responseMimeType: 'application/json',
       responseSchema: AI_RESPONSE_SCHEMA,
       ...(thinkingConfig ? { thinkingConfig } : {}),
