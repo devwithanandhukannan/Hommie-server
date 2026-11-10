@@ -50,6 +50,33 @@ expenses.post('/', validate({
   res.status(201).json(expenseDto(e, map));
 }));
 
+expenses.patch('/:id', validate({
+  params: idParams,
+  body: z.object({
+    amount: money.optional(),
+    category: z.enum(EXPENSE_CATEGORIES).optional(),
+    date: ymd.optional(),
+    note: optText(200),
+  }).strict(),
+}), h(async (req, res) => {
+  const e = await Expense.findOne({ _id: req.valid.params.id, familyId: req.ctx.familyId });
+  if (!e) throw notFound();
+  if (e.source === 'bill') throw badRequest('This expense comes from a paid bill and cannot be edited here.');
+  if (String(e.createdBy) !== req.ctx.me && !isAdmin(req)) throw forbidden('Only the creator or an admin can edit this expense');
+  const b = req.valid.body;
+  if (b.category !== undefined) e.category = b.category;
+  if (b.date !== undefined) e.date = b.date;
+  if (b.note !== undefined) e.note = b.note;
+  if (b.amount !== undefined && b.amount !== e.amount) {
+    const memberIds = (e.split || []).map((s) => s.memberId);
+    e.amount = b.amount;
+    e.split = equalSplit(b.amount, memberIds.length ? memberIds : [e.paidById]);
+  }
+  await e.save();
+  const { map } = await loadMembers(req.ctx.familyId);
+  res.json(expenseDto(e, map));
+}));
+
 expenses.delete('/:id', validate({ params: idParams }), h(async (req, res) => {
   const e = await Expense.findOne({ _id: req.valid.params.id, familyId: req.ctx.familyId });
   if (!e) throw notFound();
