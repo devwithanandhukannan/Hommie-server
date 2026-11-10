@@ -10,7 +10,20 @@ const escapeHtml = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&a
  * and tests work without a mail server. In production a missing SMTP config is a hard error.
  */
 export const devOutbox = new Map();
-const canFake = () => !config.isProd && (!config.smtp.user || !config.smtp.pass);
+
+function resolveBrevoSender() {
+  if (config.brevo.senderEmail) return { name: config.brevo.senderName, email: config.brevo.senderEmail };
+  const rawFrom = (config.smtp.from || '').trim();
+  const angleMatch = /^(.*?)\s*<([^<>@\s]+@[^<>@\s]+)>$/.exec(rawFrom);
+  if (angleMatch) {
+    return { name: angleMatch[1].replace(/^["']|["']$/g, '').trim() || config.brevo.senderName, email: angleMatch[2].trim() };
+  }
+  if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(rawFrom)) return { name: config.brevo.senderName, email: rawFrom };
+  if (config.smtp.user) return { name: config.brevo.senderName, email: config.smtp.user.trim() };
+  return null;
+}
+
+const canFake = () => !config.isProd && !config.brevo.apiKey && (!config.smtp.user || !config.smtp.pass);
 
 function getTransporter() {
   if (!transporter) {
@@ -31,6 +44,46 @@ function getTransporter() {
   return transporter;
 }
 
+async function deliverEmail({ to, subject, text, html }) {
+  if (config.brevo.apiKey) {
+    const sender = resolveBrevoSender();
+    if (!sender?.email) throw new Error('Brevo sender email is not configured (set BREVO_SENDER_EMAIL or SMTP_USER)');
+    const res = await fetch('https://api.brevo.com/v3/smtp/email', {
+      method: 'POST',
+      headers: {
+        accept: 'application/json',
+        'content-type': 'application/json',
+        'api-key': config.brevo.apiKey,
+      },
+      body: JSON.stringify({
+        sender,
+        to: [{ email: to }],
+        subject,
+        htmlContent: html,
+        textContent: text,
+      }),
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (!res.ok) {
+      const errBody = await res.text().catch(() => '');
+      throw new Error(`Brevo API error (${res.status}): ${errBody || res.statusText}`);
+    }
+    return;
+  }
+
+  const mailer = getTransporter();
+  if (!mailer) {
+    throw new Error('Email service is not configured on the server');
+  }
+  await mailer.sendMail({
+    from: config.smtp.from,
+    to,
+    subject,
+    text,
+    html,
+  });
+}
+
 /**
  * Sends a 6-digit verification OTP email to the user for account registration.
  */
@@ -40,8 +93,7 @@ export async function sendOtpEmail(toEmail, otp, name = '') {
     if (!config.isTest) console.warn(`[mail:dev] verification code for ${toEmail}: ${otp}`);
     return;
   }
-  const mailer = getTransporter();
-  if (!mailer) {
+  if (!config.brevo.apiKey && !getTransporter()) {
     throw new Error('Email service is not configured on the server');
   }
 
@@ -102,8 +154,7 @@ export async function sendOtpEmail(toEmail, otp, name = '') {
 
   const text = `Hi ${plainFirst},\n\nYour Hommi verification code is: ${otp}\n\nThis code expires in 10 minutes.\n\nIf you did not request this, please ignore this email.\n\nHommi`;
 
-  await mailer.sendMail({
-    from: config.smtp.from,
+  await deliverEmail({
     to: toEmail,
     subject,
     text,
@@ -120,8 +171,7 @@ export async function sendPasswordResetEmail(toEmail, resetUrl, name = '') {
     if (!config.isTest) console.warn(`[mail:dev] password reset link for ${toEmail}: ${resetUrl}`);
     return;
   }
-  const mailer = getTransporter();
-  if (!mailer) {
+  if (!config.brevo.apiKey && !getTransporter()) {
     throw new Error('Email service is not configured on the server');
   }
 
@@ -186,8 +236,7 @@ export async function sendPasswordResetEmail(toEmail, resetUrl, name = '') {
 
   const text = `Hi ${plainFirst},\n\nWe received a request to reset your password for Hommi. Use the link below to set a new password:\n\n${resetUrl}\n\nThis link expires in 1 hour.\n\nIf you did not request this, please ignore this email.\n\nHommi`;
 
-  await mailer.sendMail({
-    from: config.smtp.from,
+  await deliverEmail({
     to: toEmail,
     subject,
     text,

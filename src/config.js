@@ -47,6 +47,11 @@ export const config = {
     pass: (e.SMTP_PASS || '').replace(/\s+/g, ''),
     from: e.EMAIL_FROM || (e.SMTP_USER ? `"Hommi" <${e.SMTP_USER}>` : ''),
   },
+  brevo: {
+    apiKey: (e.BREVO_API_KEY || '').trim(),
+    senderEmail: (e.BREVO_SENDER_EMAIL || '').trim(),
+    senderName: (e.BREVO_SENDER_NAME || 'Hommi').trim(),
+  },
   bcryptCost: isTest ? 4 : 12,
   accessTtl: '15m',
   refreshDays: 30,
