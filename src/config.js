@@ -1,18 +1,21 @@
 const e = process.env;
 const isProd = e.NODE_ENV === 'production';
 const isTest = e.NODE_ENV === 'test';
+// Insecure development defaults are ONLY allowed when NODE_ENV is explicitly "development" or "test".
+// A forgotten NODE_ENV used to silently fall back to publicly known secrets; now it refuses to start.
+const allowDevDefaults = e.NODE_ENV === 'development' || isTest;
 
 function need(name, devDefault) {
   const v = e[name];
   if (v) return v;
-  if (!isProd && devDefault !== undefined) return devDefault;
-  throw new Error(`Missing required environment variable: ${name}`);
+  if (allowDevDefaults && devDefault !== undefined) return devDefault;
+  throw new Error(`Missing required environment variable: ${name} (set NODE_ENV=development for local dev defaults)`);
 }
 
 const jwtSecret = need('JWT_ACCESS_SECRET', 'dev-only-secret-do-not-use-in-production-0123456789');
 const masterKeyHex = need('DOC_MASTER_KEY', 'a'.repeat(64));
 
-if (isProd) {
+if (!allowDevDefaults) {
   if (jwtSecret.length < 32) throw new Error('JWT_ACCESS_SECRET must be at least 32 characters');
   if (!/^[0-9a-fA-F]{64}$/.test(masterKeyHex)) {
     throw new Error('DOC_MASTER_KEY must be 64 hex characters (32 bytes)');
@@ -42,7 +45,7 @@ export const config = {
     secure: (e.SMTP_SECURE ?? 'true') !== 'false',
     user: e.SMTP_USER || '',
     pass: (e.SMTP_PASS || '').replace(/\s+/g, ''),
-    from: e.EMAIL_FROM || (e.SMTP_USER ? `"Hommi" <${e.SMTP_USER}>` : '"Hommi" <workbridge.anandhu@gmail.com>'),
+    from: e.EMAIL_FROM || (e.SMTP_USER ? `"Hommi" <${e.SMTP_USER}>` : ''),
   },
   bcryptCost: isTest ? 4 : 12,
   accessTtl: '15m',
@@ -50,5 +53,7 @@ export const config = {
   maxDocBytes: 4 * 1024 * 1024,
   familyDocQuotaBytes: 80 * 1024 * 1024,
   defaultTimezone: e.DEFAULT_TIMEZONE || 'Asia/Kolkata',
+  // No fallback key: a secret must never live in source control. Set GEMINI_API_KEY in the environment.
   geminiApiKey: e.GEMINI_API_KEY || '',
+  geminiModel: e.GEMINI_MODEL || 'gemini-3.5-flash-lite',
 };

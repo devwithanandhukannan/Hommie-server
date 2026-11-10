@@ -42,7 +42,13 @@ families.post('/accept-invite', inviteLimiter, validate({ body: z.object({ code:
   const codeHash = sha256(normCode(req.valid.body.code));
   const inv = await Invite.findOne({ codeHash });
   if (!inv || inv.revokedAt || inv.expiresAt < new Date() || inv.usedCount >= inv.maxUses) throw badRequest('This invite is invalid or has expired');
-  if (await Membership.exists({ familyId: inv.familyId, userId: req.ctx.user._id, status: 'active' })) throw conflict('You are already in this family');
+  const existing = await Membership.findOne({ familyId: inv.familyId, userId: req.ctx.user._id, status: 'active' });
+  if (existing) {
+    // Tapping an old invite link again is not an error: you are in, so just take the person there (the invite is not used up).
+    const fam = await Family.findById(inv.familyId);
+    const { map } = await loadMembers(fam._id);
+    return res.status(200).json(familyDto(fam, [...map.values()], existing));
+  }
   if ((await Membership.countDocuments({ userId: req.ctx.user._id, status: 'active' })) >= 10) throw badRequest('You can be part of at most 10 families');
   const claimed = await Invite.findOneAndUpdate({ _id: inv._id, usedCount: { $lt: inv.maxUses }, revokedAt: null }, { $inc: { usedCount: 1 } }, { new: true });
   if (!claimed) throw badRequest('This invite is invalid or has expired');
@@ -96,7 +102,7 @@ cur.post('/members', requireAdmin, validate({
   body: z.object({ displayName: text(60), relation: z.enum(RELATIONS).default('other'), role: z.enum(['admin', 'member']).default('member') }).strict(),
 }), h(async (req, res) => {
   if (req.valid.body.role === 'admin' && req.ctx.membership.role !== 'owner') throw forbidden('Only the owner can add an admin');
-  const n = await Membership.countDocuments({ familyId: req.ctx.familyId });
+  const n = await Membership.countDocuments({ familyId: req.ctx.familyId, status: 'active' });
   if (n >= 30) throw badRequest('A family can have at most 30 members');
   const m = await Membership.create({ familyId: req.ctx.familyId, ...req.valid.body, color: COLORS[n % COLORS.length] });
   await audit(req, 'member.add', 'membership', m._id, { displayName: m.displayName });
@@ -175,17 +181,6 @@ cur.get('/invites', requireAdmin, h(async (req, res) => {
 cur.delete('/invites/:id', requireAdmin, validate({ params: idParams }), h(async (req, res) => {
   await Invite.updateOne({ _id: req.valid.params.id, familyId: req.ctx.familyId }, { $set: { revokedAt: new Date() } });
   res.status(204).end();
-}));
-
-// Admin issues a one-time password reset code for a member who has an account.
-cur.post('/members/:id/reset-code', requireAdmin, validate({ params: idParams }), h(async (req, res) => {
-  const m = await Membership.findOne({ _id: req.valid.params.id, familyId: req.ctx.familyId, status: 'active', userId: { $ne: null } });
-  if (!m || String(m._id) === req.ctx.me) throw badRequest('Choose another member who has an account');
-  if (m.role === 'owner' || (m.role === 'admin' && req.ctx.membership.role !== 'owner')) throw forbidden();
-  const code = newInviteCode().slice(0, 14);
-  await User.updateOne({ _id: m.userId }, { $set: { resetHash: sha256(normCode(code)), resetExpiresAt: new Date(Date.now() + 30 * 60_000) } });
-  await audit(req, 'member.reset-code', 'membership', m._id);
-  res.status(201).json({ code, expiresInMinutes: 30 });
 }));
 
 cur.get('/audit', requireAdmin, h(async (req, res) => {

@@ -69,9 +69,15 @@ bills.patch('/:id', validate({ params: idParams, body: billShape.partial() }), h
   const merged = { ...bill.toObject(), ...req.valid.body };
   if (!fixedNeedsAmount(merged)) throw badRequest('Fixed bills need an amount');
   await checkMembers(req.ctx.familyId, [req.valid.body.payerId, ...(req.valid.body.splitAmong || [])]);
+  const scheduleChanged = !!req.valid.body.rule;
   Object.assign(bill, req.valid.body);
   await bill.save();
   await audit(req, 'bill.update', 'bill', bill._id);
+  if (scheduleChanged) {
+    // Open instances (and their tasks) were generated from the old schedule; rebuild them from the new one.
+    await removeOpenInstances(bill._id);
+    await ensureInstances(req.ctx.family);
+  }
 
   // Sync open instances and their tasks if title or fixedAmount or payerId changed
   if (req.valid.body.title || req.valid.body.fixedAmount !== undefined || req.valid.body.payerId !== undefined) {

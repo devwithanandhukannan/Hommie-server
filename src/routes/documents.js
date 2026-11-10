@@ -161,7 +161,8 @@ documents.get('/:id/access-log', validate({ params: idParams }), h(async (req, r
 // ---------- images and voice notes for chat and recipe photos (encrypted at rest, family-only) ----------
 attachments.post('/', uploadLimiter, upload.single('file'), h(async (req, res) => {
   if (!req.file) throw badRequest('Attach an image or audio file');
-  const mime = sniff(req.file.buffer) || (req.file.mimetype?.startsWith('audio/') ? req.file.mimetype : null);
+  // The type comes from the file's own bytes only; a client-supplied Content-Type is never stored or served.
+  const mime = sniff(req.file.buffer);
   if (!mime || (!mime.startsWith('image/') && !mime.startsWith('audio/'))) {
     throw badRequest('Only JPG, PNG, WebP images and audio files are allowed');
   }

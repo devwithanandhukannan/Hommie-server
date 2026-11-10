@@ -46,7 +46,7 @@ calendar.get('/', validate({
 
   // Parallel fetch of all items within range
   const [tasks, openInst, recipes, meals, specials, meds, medLogs, docsList, loans, guests] = await Promise.all([
-    Task.find({ familyId, dueDate: { $gte: from, $lte: to } }).limit(500),
+    Task.find({ familyId, kind: { $ne: 'bill' }, dueDate: { $gte: from, $lte: to } }).limit(500),
     BillInstance.find({ familyId, dueDate: { $gte: from, $lte: to } }).limit(500),
     Recipe.find({ familyId }).select('title'),
     MealPlan.find({ familyId, date: { $gte: from, $lte: to } }).limit(500),
@@ -218,15 +218,16 @@ calendar.get('/', validate({
     }
   }
 
-  // 8. Loan EMIs
+  // 8. Loan EMIs (a date already covered by the loan's EMI bill instance is not listed twice)
+  const instKeys = new Set(openInst.map((i) => `${i.billId}_${i.dueDate}`));
   for (const l of loans) {
     if (l.visibility === 'family' || String(l.ownerId) === me) {
-      const startM = Number(from.slice(5, 7));
-      const endM = Number(to.slice(5, 7));
-      const y = Number(from.slice(0, 4));
-      for (let m = startM; m <= endM; m++) {
+      let y = Number(from.slice(0, 4));
+      let m = Number(from.slice(5, 7));
+      const endKey = Number(to.slice(0, 4)) * 12 + Number(to.slice(5, 7));
+      for (; y * 12 + m <= endKey; m === 12 ? (y++, m = 1) : m++) {
         const cand = `${y}-${String(m).padStart(2, '0')}-${String(l.emiDay).padStart(2, '0')}`;
-        if (cand >= from && cand <= to) {
+        if (cand >= from && cand <= to && !(l.billId && instKeys.has(`${l.billId}_${cand}`))) {
           events.push({
             id: `${l._id}_${cand}`,
             date: cand,

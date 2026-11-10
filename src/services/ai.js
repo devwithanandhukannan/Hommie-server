@@ -8,8 +8,8 @@ function callGemini(payload) {
       return reject(new Error('GEMINI_API_KEY is not configured on the server'));
     }
 
-    // gemini-3.5-flash-lite is the fast multimodal model
-    const path = `/v1beta/models/gemini-3.5-flash-lite:generateContent?key=${encodeURIComponent(key)}`;
+    // The key travels in a header, never in the URL (URLs end up in logs and proxies).
+    const path = `/v1beta/models/${encodeURIComponent(config.geminiModel)}:generateContent`;
     const dataString = JSON.stringify(payload);
 
     const req = https.request(
@@ -21,7 +21,9 @@ function callGemini(payload) {
         headers: {
           'Content-Type': 'application/json',
           'Content-Length': Buffer.byteLength(dataString),
+          'x-goog-api-key': key,
         },
+        timeout: 25_000,
       },
       (res) => {
         let body = '';
@@ -43,6 +45,7 @@ function callGemini(payload) {
       }
     );
 
+    req.on('timeout', () => req.destroy(new Error('Gemini request timed out')));
     req.on('error', (err) => reject(err));
     req.write(dataString);
     req.end();
@@ -69,9 +72,10 @@ function cleanJson(rawText) {
 function formatContext(context = {}) {
   const neededGroceriesSummary = (context.neededGroceries || []).map((g) => `${g.name}${g.qty ? ` (${g.qty})` : ''}`).join(', ') || 'None';
   const inStockSummary = (context.inStockGroceries || []).map((g) => `${g.name}${g.qty ? ` (${g.qty})` : ''}`).join(', ') || 'None';
-  const tasksSummary = (context.openTasks || []).map((t) => `ID:${t._id || t.id} - ${t.title}${t.assigneeId?.displayName ? ` (for ${t.assigneeId.displayName})` : ''}`).join('; ') || 'No open tasks';
-  const medicinesSummary = (context.todayMedicines || []).map((m) => `${m.forMemberId?.displayName || 'Member'}: ${m.name} at ${m.time || 'scheduled'} (${m.dosage || '1 dose'}) - Status: ${m.status || 'pending'}`).join('; ') || 'No medicines scheduled today';
+  const tasksSummary = (context.openTasks || []).map((t) => `ID:${t._id || t.id} - ${t.title}${t.assigneeName ? ` (for ${t.assigneeName})` : ''}${t.dueDate ? ` due ${t.dueDate}` : ''}`).join('; ') || 'No open tasks';
+  const medicinesSummary = (context.todayMedicines || []).map((m) => `${m.forName || 'Member'}: ${m.name} at ${m.time || 'scheduled'} (${m.dosage || '1 dose'}) - Status: ${m.status || 'pending'}`).join('; ') || 'No medicines scheduled today';
   const expensesBreakdown = Object.entries(context.monthlyExpenseCategories || {}).map(([cat, amt]) => `${cat}: ₹${amt}`).join(', ') || 'None';
+  const billsSummary = (context.upcomingBills || []).map((b) => `${b.title} due ${b.dueDate}${b.amount != null ? ` (₹${b.amount})` : ''}`).join('; ') || 'No bills due soon';
   const membersSummary = (context.familyMembers || []).map((m) => `${m.name} (relation: ${m.relation || 'member'})`).join(', ') || 'Family members';
 
   return `LIVE HOUSEHOLD GROUND-TRUTH:
@@ -82,6 +86,7 @@ function formatContext(context = {}) {
 - Kitchen Inventory (already in stock): ${inStockSummary}
 - Open Tasks: ${tasksSummary}
 - Today's Medicines: ${medicinesSummary}
+- Bills due within 14 days: ${billsSummary}
 - Current Month Expenses: ₹${context.monthlyExpenseTotal || 0} (${expensesBreakdown})`;
 }
 

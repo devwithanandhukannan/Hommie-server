@@ -1,8 +1,8 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import { h, notFound } from '../lib/errors.js';
-import { validate, idParams, text, optText, money, ymd, oid } from '../lib/validate.js';
-import { GroceryItem } from '../models/index.js';
+import { validate, idParams, text, optText, money, ymd } from '../lib/validate.js';
+import { GroceryItem, Expense } from '../models/index.js';
 import { groceryDto } from '../dto.js';
 import { loadMembers } from '../services/members.js';
 import { createExpense, equalSplit } from '../services/expenses.js';
@@ -10,6 +10,29 @@ import { systemMessage } from '../services/chat.js';
 import { todayIn } from '../lib/dates.js';
 
 export const grocery = Router();
+
+/**
+ * One purchase = one expense. A repeated price (double tap, or a correction) updates the expense made in the
+ * last 24 hours for this item instead of adding a duplicate that could never be deleted.
+ */
+async function recordGroceryExpense(req, g, price, date) {
+  const { ids } = await loadMembers(req.ctx.familyId);
+  const split = equalSplit(price, ids);
+  const recent = await Expense.findOne({
+    familyId: req.ctx.familyId, source: 'grocery', sourceId: g._id, createdAt: { $gt: new Date(Date.now() - 864e5) },
+  }).sort({ _id: -1 });
+  if (recent) {
+    recent.amount = price; recent.split = split; recent.paidById = req.ctx.me;
+    if (date) recent.date = date;
+    await recent.save();
+    return { expense: recent, created: false };
+  }
+  const expense = await createExpense({
+    familyId: req.ctx.familyId, amount: price, category: 'grocery', date: date || todayIn(req.ctx.family.timezone),
+    paidById: req.ctx.me, split, note: g.name, source: 'grocery', sourceId: g._id, createdBy: req.ctx.me,
+  });
+  return { expense, created: true };
+}
 const keyOf = (n) => n.trim().toLowerCase().replace(/\s+/g, ' ');
 
 export async function addNeeded(familyId, name, addedBy, qty, category, shop) {
@@ -62,45 +85,6 @@ grocery.patch('/:id', validate({ params: idParams, body: z.object({ name: text(8
   res.json(groceryDto(g, map));
 }));
 
-grocery.post('/bill', validate({
-  body: z.object({
-    amount: money,
-    itemIds: z.array(oid).min(1).max(100),
-    date: ymd.optional(),
-    note: optText(200).optional(),
-    paidById: oid.optional(),
-    equalAmong: z.array(oid).optional(),
-  }).strict(),
-}), h(async (req, res) => {
-  const { amount, itemIds, date, note, paidById, equalAmong } = req.valid.body;
-  const items = await GroceryItem.find({ _id: { $in: itemIds }, familyId: req.ctx.familyId });
-  const eachPrice = Math.round(amount / (items.length || 1));
-  for (const g of items) {
-    g.lastPrice = eachPrice;
-    await g.save();
-  }
-  const { ids } = await loadMembers(req.ctx.familyId);
-  const payer = paidById || req.ctx.me;
-  const billNote = note || `Grocery: ${items.map((i) => i.name).join(', ')}`.slice(0, 200);
-  const exp = await createExpense({
-    familyId: req.ctx.familyId,
-    amount,
-    category: 'grocery',
-    date: date || todayIn(req.ctx.family.timezone),
-    paidById: payer,
-    split: equalSplit(amount, equalAmong || ids),
-    note: billNote,
-    source: 'grocery',
-    createdBy: req.ctx.me,
-  });
-  await systemMessage(
-    req.ctx.familyId,
-    `Grocery bill recorded: ₹${Math.round(amount / 100)} for ${items.length} item${items.length === 1 ? '' : 's'} by ${req.ctx.membership.displayName}`,
-    { kind: 'grocery', title: 'Grocery bill' }
-  );
-  res.status(201).json({ success: true, expenseId: exp._id });
-}));
-
 grocery.post('/:id/bought', validate({ params: idParams, body: z.object({ price: money.optional(), date: ymd.optional() }).strict().optional().default({}) }), h(async (req, res) => {
   const g = await GroceryItem.findOne({ _id: req.valid.params.id, familyId: req.ctx.familyId });
   if (!g) throw notFound();
@@ -113,13 +97,7 @@ grocery.post('/:id/bought', validate({ params: idParams, body: z.object({ price:
     g.lastPrice = req.valid.body.price;
   }
   await g.save();
-  if (req.valid.body?.price) {
-    const { ids } = await loadMembers(req.ctx.familyId);
-    await createExpense({
-      familyId: req.ctx.familyId, amount: req.valid.body.price, category: 'grocery', date: req.valid.body.date || todayIn(req.ctx.family.timezone),
-      paidById: req.ctx.me, split: equalSplit(req.valid.body.price, ids), note: g.name, source: 'grocery', sourceId: g._id, createdBy: req.ctx.me,
-    });
-  }
+  if (req.valid.body?.price) await recordGroceryExpense(req, g, req.valid.body.price, req.valid.body.date);
   await systemMessage(
     req.ctx.familyId,
     `${g.name} bought by ${req.ctx.membership.displayName}${req.valid.body?.price ? ` (₹${Math.round(req.valid.body.price / 100)})` : ''}`,
@@ -134,24 +112,14 @@ grocery.post('/:id/price', validate({ params: idParams, body: z.object({ price: 
   if (!g) throw notFound();
   g.lastPrice = req.valid.body.price;
   await g.save();
-  const { ids } = await loadMembers(req.ctx.familyId);
-  await createExpense({
-    familyId: req.ctx.familyId,
-    amount: req.valid.body.price,
-    category: 'grocery',
-    date: req.valid.body.date || todayIn(req.ctx.family.timezone),
-    paidById: req.ctx.me,
-    split: equalSplit(req.valid.body.price, ids),
-    note: g.name,
-    source: 'grocery',
-    sourceId: g._id,
-    createdBy: req.ctx.me,
-  });
-  await systemMessage(
-    req.ctx.familyId,
-    `Added expense for ${g.name}: ₹${Math.round(req.valid.body.price / 100)} by ${req.ctx.membership.displayName}`,
-    { kind: 'grocery', id: g._id, title: g.name }
-  );
+  const { created } = await recordGroceryExpense(req, g, req.valid.body.price, req.valid.body.date);
+  if (created) {
+    await systemMessage(
+      req.ctx.familyId,
+      `Added expense for ${g.name}: ₹${Math.round(req.valid.body.price / 100)} by ${req.ctx.membership.displayName}`,
+      { kind: 'grocery', id: g._id, title: g.name }
+    );
+  }
   const { map } = await loadMembers(req.ctx.familyId);
   res.status(200).json(groceryDto(g, map));
 }));

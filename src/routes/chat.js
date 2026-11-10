@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { h, badRequest, forbidden, notFound } from '../lib/errors.js';
 import { validate, idParams, oid, optText } from '../lib/validate.js';
-import { ChatMessage, Membership, Attachment, Task, BillInstance, Bill, Recipe, GroceryItem } from '../models/index.js';
+import { ChatMessage, Membership, Attachment, Family, Task, BillInstance, Bill, Recipe, GroceryItem } from '../models/index.js';
 import { chatDto } from '../dto.js';
 import { loadMembers } from '../services/members.js';
 import { notify, userIdsOf } from '../services/push.js';
@@ -72,11 +72,8 @@ chat.post('/messages', chatLimiter, validate({
     text: optText(2000),
     attachmentId: oid.optional(),
     audioDuration: z.number().min(1).max(60).optional(),
-    replyTo: z.object({
-      id: oid,
-      senderName: optText(80),
-      text: optText(400),
-    }).strict().optional(),
+    // Only the id is trusted: the quoted sender and text are always read from the original message.
+    replyTo: z.object({ id: oid, senderName: optText(80), text: optText(400) }).strict().optional(),
     ref: z.object({ kind: z.enum(['task', 'bill_instance', 'recipe', 'grocery']), id: oid }).strict().optional(),
   }).strict().refine((b) => (b.text && b.text.length) || b.attachmentId || b.ref, { message: 'Write a message or attach something' }),
 }), h(async (req, res) => {
@@ -92,13 +89,21 @@ chat.post('/messages', chatLimiter, validate({
   const ref = b.ref ? await resolveRef(req.ctx.familyId, b.ref) : undefined;
   if (b.ref && !ref) throw badRequest('That item was not found');
   const type = ref ? 'card' : isAudio ? 'audio' : attachmentId ? 'image' : 'text';
+  let replyTo;
+  if (b.replyTo) {
+    const orig = await ChatMessage.findOne({ _id: b.replyTo.id, familyId: req.ctx.familyId });
+    if (!orig) throw badRequest('The message you replied to no longer exists');
+    const { map: names } = await loadMembers(req.ctx.familyId);
+    const who = orig.senderId ? (names.get(String(orig.senderId))?.displayName || 'Former member') : 'Hommi';
+    replyTo = { id: orig._id, senderName: who, text: (orig.text || (orig.type === 'audio' ? 'Voice message' : orig.type === 'image' ? 'Photo' : '')).slice(0, 200) };
+  }
   const msg = await ChatMessage.create({
     familyId: req.ctx.familyId,
     senderId: req.ctx.me,
     text: b.text,
     attachmentId,
     audioDuration: b.audioDuration,
-    replyTo: b.replyTo,
+    replyTo,
     ref,
     type,
   });
@@ -128,5 +133,10 @@ chat.delete('/messages/:id', validate({ params: idParams }), h(async (req, res) 
   if (m.type === 'system') throw forbidden('Automatic messages cannot be deleted');
   if (String(m.senderId) !== req.ctx.me && !isAdmin(req)) throw forbidden('You can only delete your own messages');
   await m.deleteOne();
+  if (m.attachmentId) {
+    // Free the encrypted file and give its bytes back to the family quota (they were leaking before).
+    const gone = await Attachment.findOneAndDelete({ _id: m.attachmentId, familyId: req.ctx.familyId }).select('size');
+    if (gone) await Family.updateOne({ _id: req.ctx.familyId }, { $inc: { storageBytes: -gone.size } });
+  }
   res.status(204).end();
 }));

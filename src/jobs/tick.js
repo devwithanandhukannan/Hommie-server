@@ -41,10 +41,10 @@ export async function runTick(now = new Date()) {
               title: `${bill.title} is overdue`, body: `It was due on ${inst.dueDate}.`, dedupeKey: `bill:${inst._id}:overdue`,
             });
             inst.overdueSentAt = now; await inst.save(); stats.notifications++;
-          } else if (daysLeft >= 0 && daysLeft <= bill.reminderDaysBefore && !inst.reminderSentAt && daysLeft <= 1) {
+          } else if (daysLeft >= 0 && daysLeft <= bill.reminderDaysBefore && !inst.reminderSentAt) {
             await notify({
               userIds: uidOf(bill.payerId), familyId: family._id, type: 'bill', url: '/bills',
-              title: daysLeft === 0 ? `${bill.title} is due today` : `${bill.title} is due tomorrow`,
+              title: daysLeft === 0 ? `${bill.title} is due today` : daysLeft === 1 ? `${bill.title} is due tomorrow` : `${bill.title} is due in ${daysLeft} days`,
               body: inst.amount != null ? `Amount ${money(inst.amount)}` : 'Amount still needed', pushBody: 'Open the app to take care of it',
               dedupeKey: `bill:${inst._id}:due`,
             });
@@ -59,7 +59,7 @@ export async function runTick(now = new Date()) {
           if (m.days?.length && !m.days.includes(weekday(today))) continue;
           for (const t of m.times) {
             const late = minutes(time) - minutes(t);
-            if (late < 0 || late > 30) continue;
+            if (late < 0 || late > 30) continue; // 30-minute catch-up window after the dose time
             if (await MedicineLog.exists({ medicineId: m._id, date: today, time: t })) continue;
             await notify({
               userIds: [...uidOf(m.forId), ...(m.caregivers || []).flatMap(uidOf)], familyId: family._id, type: 'medicine', url: '/medicine',

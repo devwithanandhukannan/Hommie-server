@@ -2,9 +2,10 @@ import { Router } from 'express';
 import bcrypt from 'bcryptjs';
 import { z } from 'zod';
 import { config } from '../config.js';
-import { h, unauthorized, conflict, badRequest, notFound } from '../lib/errors.js';
+import { h, HttpError, unauthorized, conflict, badRequest, notFound } from '../lib/errors.js';
 import { validate, idParams, text } from '../lib/validate.js';
-import { randomToken, sha256 } from '../lib/crypto.js';
+import crypto from 'node:crypto';
+import { randomToken, sha256, safeEqual } from '../lib/crypto.js';
 import { signAccess } from '../lib/tokens.js';
 import { User, Session, Membership, Family, FAMILY_SCOPED, Notification, EmailOtp, allModels } from '../models/index.js';
 import { userDto, notificationDto } from '../dto.js';
@@ -17,6 +18,8 @@ const refreshCookie = { ...cookieBase, httpOnly: true, path: '/api/auth', maxAge
 
 const email = z.string().trim().toLowerCase().email().max(254);
 const password = z.string().min(10, 'Use at least 10 characters').max(128);
+const newOtp = () => String(crypto.randomInt(100000, 1000000));
+const OTP_COOLDOWN_MS = 45_000;
 const DUMMY_HASH = bcrypt.hashSync('not-a-real-password', config.bcryptCost);
 
 async function startSession(user, req, res) {
@@ -38,7 +41,11 @@ publicAuth.post('/register/send-otp', authLimiter, validate({ body: z.object({ n
   if (pw.toLowerCase() === mail) throw badRequest('Password must not be your email');
   if (await User.exists({ email: mail })) throw conflict('An account with this email already exists');
 
-  const otp = String(Math.floor(100000 + Math.random() * 900000));
+  const recent = await EmailOtp.findOne({ email: mail, type: 'register' }).select('createdAt');
+  if (recent && Date.now() - recent.createdAt.getTime() < OTP_COOLDOWN_MS) {
+    throw new HttpError(429, 'Please wait a moment before asking for another code.');
+  }
+  const otp = newOtp();
   const passwordHash = await bcrypt.hash(pw, config.bcryptCost);
   const otpHash = sha256(otp);
 
@@ -67,7 +74,7 @@ publicAuth.post('/register/verify-otp', authLimiter, validate({ body: z.object({
   const record = await EmailOtp.findOne({ email: mail, type: 'register', expiresAt: { $gt: new Date() } });
   if (!record) throw badRequest('Verification code has expired or is invalid. Please request a new one.');
 
-  const isMatch = record.otpHash === sha256(otp.trim());
+  const isMatch = safeEqual(record.otpHash, sha256(otp.trim()));
   if (!isMatch) {
     record.attempts = (record.attempts || 0) + 1;
     if (record.attempts >= 5) {
@@ -88,48 +95,6 @@ publicAuth.post('/register/verify-otp', authLimiter, validate({ body: z.object({
 
   await EmailOtp.deleteOne({ _id: record._id });
   res.status(201).json(await startSession(user, req, res));
-}));
-
-// Flexible /register endpoint (handles send-otp or direct verify if otp provided)
-publicAuth.post('/register', authLimiter, validate({
-  body: z.object({
-    name: text(80).optional(),
-    email,
-    password: password.optional(),
-    otp: z.string().trim().optional(),
-  }).strict(),
-}), h(async (req, res) => {
-  const { name, email: mail, password: pw, otp } = req.valid.body;
-  if (otp) {
-    const record = await EmailOtp.findOne({ email: mail, type: 'register', expiresAt: { $gt: new Date() } });
-    if (!record) throw badRequest('Verification code has expired or is invalid. Please request a new one.');
-    if (record.otpHash !== sha256(otp.trim())) throw badRequest('Incorrect verification code');
-    if (await User.exists({ email: mail })) throw conflict('An account with this email already exists');
-    const user = await User.create({ name: record.payload.name, email: mail, passwordHash: record.payload.passwordHash });
-    await EmailOtp.deleteOne({ _id: record._id });
-    return res.status(201).json(await startSession(user, req, res));
-  }
-  if (!name || !pw) throw badRequest('Name and password are required');
-  if (pw.toLowerCase() === mail) throw badRequest('Password must not be your email');
-  if (await User.exists({ email: mail })) throw conflict('An account with this email already exists');
-
-  const code = String(Math.floor(100000 + Math.random() * 900000));
-  const passwordHash = await bcrypt.hash(pw, config.bcryptCost);
-  await EmailOtp.deleteMany({ email: mail, type: 'register' });
-  await EmailOtp.create({
-    email: mail,
-    otpHash: sha256(code),
-    type: 'register',
-    payload: { name, passwordHash },
-    expiresAt: new Date(Date.now() + 10 * 60_000),
-  });
-  try {
-    await sendOtpEmail(mail, code, name);
-  } catch (err) {
-    console.error('[auth] Failed to send OTP:', err);
-    throw badRequest('Failed to send verification email. Please check your email address.');
-  }
-  res.json({ status: 'otp_sent', email: mail, message: 'Verification code sent to your email' });
 }));
 
 publicAuth.post('/login', authLimiter, validate({ body: z.object({ email, password: z.string().min(1).max(128) }).strict() }), h(async (req, res) => {
@@ -225,20 +190,6 @@ publicAuth.post('/reset-password', authLimiter, validate({
   });
   await Session.updateMany({ userId: user._id }, { $set: { revokedAt: new Date() } });
   res.json({ success: true, message: 'Password updated successfully. You can now sign in.' });
-}));
-
-// One-time reset code issued by a family admin (no e-mail service is needed on the free tier).
-publicAuth.post('/reset', authLimiter, validate({ body: z.object({ email, code: z.string().trim().min(8).max(40), newPassword: password }).strict() }), h(async (req, res) => {
-  const { email: mail, code, newPassword } = req.valid.body;
-  const user = await User.findOne({ email: mail }).select('+resetHash');
-  const ok = user?.resetHash && user.resetExpiresAt > new Date() && user.resetHash === sha256(code.replace(/-/g, '').toUpperCase());
-  if (!ok) throw badRequest('This reset code is invalid or expired');
-  await User.updateOne({ _id: user._id }, {
-    $set: { passwordHash: await bcrypt.hash(newPassword, config.bcryptCost), failedLogins: 0 },
-    $inc: { tokenVersion: 1 }, $unset: { resetHash: 1, resetExpiresAt: 1, lockedUntil: 1 },
-  });
-  await Session.updateMany({ userId: user._id }, { $set: { revokedAt: new Date() } });
-  res.status(204).end();
 }));
 
 // ---------- authenticated account routes ----------

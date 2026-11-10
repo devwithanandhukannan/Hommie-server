@@ -80,21 +80,28 @@ export async function payInstance({ instance, bill, family, paidById, paidOn, re
   );
   if (!won) throw conflict('This bill is already paid');
 
-  const active = await Membership.find({ familyId: family._id, status: 'active' });
-  const activeIds = active.map((m) => String(m._id));
-  let among = (bill.splitAmong || []).map(String).filter((id) => activeIds.includes(id));
-  if (!among.length) among = activeIds;
-  const expense = await createExpense({
-    familyId: family._id, amount: won.amount, category: EXPENSE_CATEGORY[bill.category] || 'bills', date: paidOn,
-    paidById, split: equalSplit(won.amount, among), note: bill.title, source: 'bill', sourceId: won._id, createdBy: paidById,
-  });
-  won.expenseId = expense._id;
-  await won.save();
+  let expense;
+  try {
+    const active = await Membership.find({ familyId: family._id, status: 'active' });
+    const activeIds = active.map((m) => String(m._id));
+    let among = (bill.splitAmong || []).map(String).filter((id) => activeIds.includes(id));
+    if (!among.length) among = activeIds;
+    expense = await createExpense({
+      familyId: family._id, amount: won.amount, category: EXPENSE_CATEGORY[bill.category] || 'bills', date: paidOn,
+      paidById, split: equalSplit(won.amount, among), note: bill.title, source: 'bill', sourceId: won._id, createdBy: paidById,
+    });
+    won.expenseId = expense._id;
+    await won.save();
+  } catch (e) {
+    // Nothing else was written yet: put the bill back so the payment can simply be tried again.
+    await BillInstance.updateOne({ _id: instance._id }, { $set: { status: 'pending' }, $unset: { paidBy: 1, paidAt: 1, receiptDocumentId: 1 } });
+    throw e;
+  }
   if (won.taskId) await Task.updateOne({ _id: won.taskId }, { $set: { status: 'done', completedBy: paidById, completedAt: new Date() } });
   if (bill.loanId) {
     const loan = await Loan.findById(bill.loanId);
     if (loan && !loan.closedAt) await recordLoanPayment(loan, { paidOn, amount: won.amount, billInstanceId: won._id });
   }
-  await systemMessage(family._id, `${bill.title} (${rupees(won.amount)}) paid by ${memberName}`, { kind: 'bill', id: bill._id, title: bill.title });
+  await systemMessage(family._id, `${bill.title} (${rupees(won.amount)}) paid by ${memberName}`, { kind: 'bill_instance', id: won._id, title: `${bill.title} · due ${won.dueDate}` });
   return won;
 }

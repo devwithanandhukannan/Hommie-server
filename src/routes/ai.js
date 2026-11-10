@@ -1,7 +1,11 @@
 import { Router } from 'express';
 import { z } from 'zod';
-import { h, badRequest, notFound } from '../lib/errors.js';
-import { validate, oid, optText } from '../lib/validate.js';
+import { h, badRequest, forbidden, notFound } from '../lib/errors.js';
+import { validate, oid, optText, ymd } from '../lib/validate.js';
+import { todayIn, addDays } from '../lib/dates.js';
+import { isAdmin } from '../middleware/auth.js';
+import { canSeeMedicine } from '../dto.js';
+import { ensureInstances } from '../services/bills.js';
 import { decryptFile } from '../lib/crypto.js';
 import { aiLimiter } from '../middleware/security.js';
 import {
@@ -17,9 +21,11 @@ import {
   MedicineLog,
   ChatMessage,
   Membership,
+  EXPENSE_CATEGORIES,
 } from '../models/index.js';
 import { analyzeWithGemini, agenticFamilyAssistant } from '../services/ai.js';
 import { loadMembers } from '../services/members.js';
+import { createExpense, equalSplit } from '../services/expenses.js';
 
 export const ai = Router();
 
@@ -28,9 +34,10 @@ ai.use(aiLimiter);
 /**
  * Builds live family ground-truth context for AI.
  */
-async function buildFamilyContext(familyId) {
-  const todayStr = new Date().toISOString().slice(0, 10);
-  const tomorrowStr = new Date(Date.now() + 86400000).toISOString().slice(0, 10);
+async function buildFamilyContext(family, me) {
+  const familyId = family._id;
+  const todayStr = todayIn(family.timezone);
+  const tomorrowStr = addDays(todayStr, 1);
   const currentMonth = todayStr.slice(0, 7);
 
   let familyMembers = [];
@@ -64,41 +71,40 @@ async function buildFamilyContext(familyId) {
   } catch {}
 
   try {
-    openTasks = await Task.find({ familyId, status: 'open' })
+    const rows = await Task.find({ familyId, status: 'open', kind: { $ne: 'bill' } })
       .select('title dueDate kind assigneeId')
-      .populate('assigneeId', 'displayName')
       .limit(30)
       .lean();
+    openTasks = rows.map((t) => ({ ...t, assigneeName: memberMap.get(String(t.assigneeId))?.displayName || null }));
   } catch {}
 
   try {
-    const [medicines, medLogs] = await Promise.all([
-      Medicine.find({ familyId, active: true })
-        .select('name dosage times instructions forMemberId')
-        .populate('forMemberId', 'displayName')
-        .lean(),
+    // Medicine is private to the patient, their caregivers and whoever added it: the AI must obey the same rule.
+    const [allMeds, medLogs] = await Promise.all([
+      Medicine.find({ familyId, active: true }).select('name dosage times forId createdBy caregivers startDate endDate days').lean(),
       MedicineLog.find({ familyId, date: todayStr }).select('medicineId time status').lean(),
     ]);
-
-    for (const med of medicines || []) {
+    const weekday = new Date(`${todayStr}T00:00:00Z`).getUTCDay();
+    for (const med of allMeds.filter((m) => canSeeMedicine(m, me))) {
+      if (med.startDate > todayStr || (med.endDate && med.endDate < todayStr)) continue;
+      if (med.days?.length && !med.days.includes(weekday)) continue;
       for (const time of med.times || []) {
-        const log = (medLogs || []).find((l) => String(l.medicineId) === String(med._id) && l.time === time);
-        todayMedicines.push({
-          id: String(med._id),
-          name: med.name,
-          dosage: med.dosage,
-          time,
-          forMemberId: med.forMemberId,
-          status: log?.status || 'pending',
-        });
+        const log = medLogs.find((l) => String(l.medicineId) === String(med._id) && l.time === time);
+        todayMedicines.push({ id: String(med._id), name: med.name, dosage: med.dosage, time, forName: memberMap.get(String(med.forId))?.displayName || 'Member', status: log?.status || 'pending' });
       }
     }
   } catch {}
 
   try {
+    const insts = await BillInstance.find({ familyId, status: { $ne: 'paid' }, dueDate: { $lte: addDays(todayStr, 14) } }).sort({ dueDate: 1 }).limit(10).lean();
+    const bills = new Map((await Bill.find({ _id: { $in: insts.map((i) => i.billId) } }).select('title').lean()).map((b) => [String(b._id), b.title]));
+    upcomingBills = insts.map((i) => ({ title: bills.get(String(i.billId)) || 'Bill', dueDate: i.dueDate, amount: i.amount == null ? null : Math.round(i.amount / 100) }));
+  } catch {}
+
+  try {
     const expenses = await Expense.find({
       familyId,
-      date: { $regex: `^${currentMonth}` },
+      date: { $gte: `${currentMonth}-01`, $lte: `${currentMonth}-31` },
     }).select('amount category note date').lean();
 
     let monthlyExpenseTotalPaise = 0;
@@ -183,7 +189,7 @@ ai.post(
       mimeType = a.mime;
     }
 
-    const context = await buildFamilyContext(familyId);
+    const context = await buildFamilyContext(req.ctx.family, req.ctx.me);
 
     const agentResponse = await agenticFamilyAssistant({
       message: message || '',
@@ -236,7 +242,7 @@ ai.post(
       mimeType = a.mime;
     }
 
-    const context = await buildFamilyContext(familyId);
+    const context = await buildFamilyContext(req.ctx.family, req.ctx.me);
     const result = await analyzeWithGemini({ text, audioBuffer, mimeType, context });
     res.json(result);
   })
@@ -311,8 +317,10 @@ ai.post(
     const me = req.ctx.me;
     const added = [];
 
-    const todayStr = new Date().toISOString().slice(0, 10);
-    const tomorrowStr = new Date(Date.now() + 86400000).toISOString().slice(0, 10);
+    const todayStr = todayIn(req.ctx.family.timezone);
+    const tomorrowStr = addDays(todayStr, 1);
+    // The model's output is untrusted: accept only real YYYY-MM-DD dates, otherwise fall back.
+    const goodDate = (d, fallback) => (typeof d === 'string' && ymd.safeParse(d).success ? d : fallback);
 
     const { docs: memberDocs } = await loadMembers(familyId);
     const findMemberId = (nameOrId) => {
@@ -320,8 +328,11 @@ ai.post(
       const clean = String(nameOrId).trim().toLowerCase();
       const byId = memberDocs.find((m) => String(m._id) === clean);
       if (byId) return byId._id;
-      const byName = memberDocs.find((m) => (m.displayName || '').toLowerCase().includes(clean) || clean.includes((m.displayName || '').toLowerCase()));
-      return byName ? byName._id : null;
+      const exact = memberDocs.filter((m) => (m.displayName || '').trim().toLowerCase() === clean);
+      if (exact.length === 1) return exact[0]._id;
+      if (clean.length < 3) return null;
+      const first = memberDocs.filter((m) => (m.displayName || '').trim().toLowerCase().split(/\s+/)[0] === clean.split(/\s+/)[0]);
+      return first.length === 1 ? first[0]._id : null; // ambiguous names are left unassigned instead of guessed
     };
 
     let lastCreatedRecipeId = null;
@@ -376,7 +387,7 @@ ai.post(
         lastCreatedRecipeId = recipe._id;
         added.push({ type: 'recipe', id: String(recipe._id), title: safeTitle });
       } else if (a.type === 'meal' || a.type === 'add_meal') {
-        const mealDate = a.date || tomorrowStr;
+        const mealDate = goodDate(a.date, tomorrowStr);
         const mealSlot = a.slot || 'noon';
         const matchedCookId = a.cookId || findMemberId(a.cookName);
         const cookDoc = matchedCookId ? memberDocs.find((m) => String(m._id) === String(matchedCookId)) : null;
@@ -408,7 +419,7 @@ ai.post(
           cookName: cookDoc?.displayName || null,
         });
       } else if (a.type === 'calendar' || a.type === 'add_calendar_event') {
-        const eventDate = a.dueDate || a.date || tomorrowStr;
+        const eventDate = goodDate(a.dueDate || a.date, tomorrowStr);
         const matchedAssigneeId = a.assigneeId || findMemberId(a.assigneeName);
         const assigneeDoc = matchedAssigneeId ? memberDocs.find((m) => String(m._id) === String(matchedAssigneeId)) : null;
 
@@ -436,23 +447,29 @@ ai.post(
           kind: 'custom',
           assigneeId: matchedAssigneeId || null,
           createdBy: me,
-          dueDate: a.dueDate || undefined,
+          dueDate: goodDate(a.dueDate, undefined),
           status: 'open',
         });
         added.push({ type: 'task', id: String(task._id), title: safeTitle });
       } else if (a.type === 'delete_task' && a.targetId) {
-        await Task.findOneAndDelete({ _id: a.targetId, familyId });
-        added.push({ type: 'task', id: String(a.targetId), title: `Deleted: ${safeTitle}` });
-      } else if ((a.type === 'expense' || a.type === 'add_expense') && a.amount && a.amount > 0) {
-        const exp = await Expense.create({
+        const target = await Task.findOne({ _id: a.targetId, familyId });
+        if (!target) continue;
+        if (target.kind === 'bill') throw badRequest('Bill tasks are managed from the bill');
+        if (String(target.createdBy) !== me && !isAdmin(req)) throw forbidden('Only the creator or an admin can delete this task');
+        await target.deleteOne();
+        added.push({ type: 'task', id: String(a.targetId), title: `Deleted: ${target.title}` });
+      } else if ((a.type === 'expense' || a.type === 'add_expense') && Number.isFinite(a.amount) && a.amount > 0 && a.amount <= 10_000_000) {
+        const paise = Math.round(a.amount * 100);
+        const exp = await createExpense({
           familyId,
-          amount: Math.round(a.amount * 100),
-          note: safeTitle,
+          amount: paise,
+          note: safeTitle.slice(0, 200),
           date: todayStr,
           paidById: me,
           createdBy: me,
           source: 'manual',
-          category: safeCat,
+          category: EXPENSE_CATEGORIES.includes(safeCat.toLowerCase()) ? safeCat.toLowerCase() : 'other',
+          split: equalSplit(paise, memberDocs.map((m) => String(m._id))),
         });
         added.push({ type: 'expense', id: String(exp._id), title: safeTitle, amount: a.amount });
       } else if (a.type === 'bill') {
@@ -460,9 +477,12 @@ ai.post(
           familyId,
           title: safeTitle,
           category: 'other',
-          rule: { unit: 'month', everyN: 1, anchorDate: todayStr },
+          amountMode: 'ask',
+          rule: { unit: 'month', everyN: 1, anchorDate: goodDate(a.dueDate || a.date, todayStr) },
+          payerId: me,
           createdBy: me,
         });
+        await ensureInstances(req.ctx.family);
         added.push({ type: 'bill', id: String(bill._id), title: safeTitle });
       } else {
         const task = await Task.create({
@@ -505,10 +525,6 @@ ai.post(
           senderId: null,
           text: sysText,
           type: 'system',
-          ref: {
-            kind: scheduledMealInfo ? 'meal' : added[0]?.type?.includes('grocery') ? 'grocery' : 'task',
-            title: scheduledMealInfo?.title || added[0]?.title || 'Items added',
-          },
         });
       } catch {
         // ignore notification error

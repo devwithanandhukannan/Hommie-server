@@ -53,7 +53,7 @@ expenses.post('/', validate({
 expenses.delete('/:id', validate({ params: idParams }), h(async (req, res) => {
   const e = await Expense.findOne({ _id: req.valid.params.id, familyId: req.ctx.familyId });
   if (!e) throw notFound();
-  if (e.source !== 'manual') throw badRequest('This expense was created from a bill or grocery item');
+  if (e.source === 'bill') throw badRequest('This expense comes from a paid bill. Paid bills cannot be removed here.');
   if (String(e.createdBy) !== req.ctx.me && !isAdmin(req)) throw forbidden('Only the creator or an admin can delete this expense');
   await e.deleteOne();
   res.status(204).end();
@@ -87,6 +87,14 @@ wallet.get('/settlements', h(async (req, res) => {
   const { map } = await loadMembers(req.ctx.familyId);
   const list = await Settlement.find({ familyId: req.ctx.familyId }).sort({ _id: -1 }).limit(50);
   res.json(list.map((s) => settlementDto(s, map)));
+}));
+
+wallet.delete('/settlements/:id', validate({ params: idParams }), h(async (req, res) => {
+  const s = await Settlement.findOne({ _id: req.valid.params.id, familyId: req.ctx.familyId });
+  if (!s) throw notFound();
+  if (String(s.fromId) !== req.ctx.me && !isAdmin(req)) throw forbidden('Only the person who recorded it, or an admin, can undo this');
+  await s.deleteOne();
+  res.status(204).end();
 }));
 
 wallet.post('/settlements', validate({ body: z.object({ toId: oid, fromId: oid.optional(), amount: money, date: ymd, note: optText(200) }).strict() }), h(async (req, res) => {
