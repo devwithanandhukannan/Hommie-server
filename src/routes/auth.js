@@ -125,7 +125,7 @@ publicAuth.post('/refresh', h(async (req, res) => {
   if (!session) {
     const reused = await Session.findOne({ prevHash: hash });
     if (!reused || reused.revokedAt) throw unauthorized();
-    if (now - (reused.rotatedAt || 0) > 30_000) {
+    if (now - (reused.rotatedAt || 0) > 60_000) {
       await Session.updateOne({ _id: reused._id }, { $set: { revokedAt: now } });
       throw unauthorized('Session ended for your safety. Please sign in again.');
     }
